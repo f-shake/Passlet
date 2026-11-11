@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "窗口权限。文件、剪贴板、对话框全部在 Rust 侧调用，不向 WebView 暴露插件命令。",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -1,0 +1,26 @@
+[package]
+name = "passlet"
+version = "0.1.0"
+description = "Passlet —— 轻量桌面密码本"
+authors = ["autod"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "passlet_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+passlet-core = { path = "../core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-clipboard-manager = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tokio = { version = "1", features = ["sync", "time"] }
+
+

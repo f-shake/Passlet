@@ -1,0 +1,20 @@
+{
+  "name": "passlet",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Passlet —— 轻量桌面密码本",
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "cargo build -p passlet-cli --release && tauri build --bundles nsis",
+    "test": "vitest run",
+    "test:rust": "cargo test --workspace -- --test-threads=1",
+    "preview": "node scripts/build-preview.mjs",
+    "vendor:sync": "node scripts/sync-vendor.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "daisyui": "^5.7.50",
+    "vitest": "^3"
+  }
+}

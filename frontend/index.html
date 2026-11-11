@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Passlet</title>
+
+<link rel="stylesheet" href="vendor/daisyui.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="app-window" id="app" data-view="query">
+
+  <!-- ============ 错误视图 ============ -->
+  <section class="view" data-view="error">
+    <div class="err-wrap">
+      <svg class="err-icon" width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="4" y="10.5" width="16" height="10.5" rx="2.5"></rect>
+        <path d="M8 10.5V7a4 4 0 0 1 7.5-2"></path>
+        <path d="M12 15v2.5"></path>
+      </svg>
+      <h1 class="err-title" id="errTitle">打不开密码库</h1>
+      <p class="err-text" id="errText"></p>
+      <code class="err-cmd" id="errCmd" hidden></code>
+      <div class="err-actions">
+        <button class="btn btn-sm" id="errCopy" hidden>复制命令</button>
+        <button class="btn btn-sm btn-primary" id="errRetry">重新读取</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 查询视图 ============ -->
+  <section class="view" data-view="query">
+    <div class="qbody">
+      <div class="form-row">
+        <label for="platInput">平台</label>
+        <div class="combo" id="comboPlat">
+          <div class="combo-field input">
+            <input id="platInput" type="text" placeholder="请选择平台" autocomplete="off" spellcheck="false">
+            <svg class="chev" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l7 7 7-7"></path></svg>
+          </div>
+          <div class="combo-pop" id="popPlat"></div>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label for="userInput">用户名</label>
+        <div class="combo disabled" id="comboUser">
+          <div class="combo-field input">
+            <input id="userInput" type="text" placeholder="请先选择平台" autocomplete="off" spellcheck="false" disabled>
+            <svg class="chev" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l7 7 7-7"></path></svg>
+          </div>
+          <div class="combo-pop" id="popUser"></div>
+        </div>
+      </div>
+
+      <div class="hr-line"></div>
+
+      <div class="form-row">
+        <label>密码</label>
+        <div class="pwd-wrap">
+          <div class="pwd-box input empty" id="pwdBox">
+            <span class="ph">选择平台和用户名后显示</span>
+            <span class="mask"></span>
+            <span class="plain"></span>
+          </div>
+          <button class="btn btn-ghost btn-sm btn-square" id="btnEye" title="显示密码" disabled>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"></path><circle cx="12" cy="12" r="2.8"></circle></svg>
+          </button>
+          <button class="btn btn-ghost btn-sm btn-square" id="btnCopy" title="复制密码" disabled>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M15 6.5V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h.5"></path></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="qfoot">
+        <span class="unlock"><span class="dot"></span>已解锁</span>
+        <button class="btn btn-sm btn-primary" id="btnOpenList">
+          打开清单
+          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"></path></svg>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 清单视图 ============ -->
+  <section class="view" data-view="list">
+    <div class="toolbar">
+      <button class="btn btn-ghost btn-sm btn-square" id="btnBackFromList" title="返回查询">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"></path></svg>
+      </button>
+      <div class="search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"></circle><path d="M16 16l4.5 4.5"></path></svg>
+        <input class="input" id="filterInput" type="text" placeholder="搜索平台或用户名" autocomplete="off" spellcheck="false">
+      </div>
+      <button class="btn btn-sm btn-primary" id="btnAdd">＋ 新增</button>
+      <button class="btn btn-ghost btn-sm btn-square" id="btnSettings" title="设置">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3.2"></circle>
+          <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"></path>
+        </svg>
+      </button>
+    </div>
+
+    <div class="thead">
+      <div>平台</div>
+      <div>用户名</div>
+      <div>密码</div>
+      <div></div>
+    </div>
+
+    <div class="entry-list" id="list"></div>
+
+    <div class="lfoot">
+      <span id="countText">共 0 条</span>
+      <span class="hint">双击行可编辑</span>
+    </div>
+  </section>
+
+  <!-- ============ 设置视图 ============ -->
+  <section class="view" data-view="settings">
+    <div class="toolbar">
+      <button class="btn btn-ghost btn-sm btn-square" id="btnBackFromSettings" title="返回清单">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"></path></svg>
+      </button>
+      <span class="toolbar-title">设置</span>
+    </div>
+
+    <div class="sbody">
+      <div class="sgroup">
+        <div class="sgroup-title">外观</div>
+        <div class="srow">
+          <span class="slabel">主题</span>
+          <select class="select select-theme" id="selTheme">
+            <option value="system">跟随系统</option>
+            <option value="light">浅色</option>
+            <option value="dark">深色</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="sgroup">
+        <div class="sgroup-title">剪贴板</div>
+        <div class="srow">
+          <label class="scheck" for="chkClipboard">
+            <input type="checkbox" class="toggle toggle-sm toggle-primary" id="chkClipboard">
+            <span>复制密码后自动清空剪贴板</span>
+          </label>
+        </div>
+        <div class="srow">
+          <span class="slabel">清空间隔</span>
+          <span class="sctl">
+            <input type="number" id="numClipboardSeconds" class="input numin" min="1" max="600" step="1">
+            <span class="sunit">秒</span>
+          </span>
+        </div>
+      </div>
+
+      <div class="sgroup">
+        <div class="sgroup-title">显示</div>
+        <div class="srow">
+          <span class="slabel">明文密码自动隐藏</span>
+          <span class="sctl">
+            <input type="number" id="numHideSeconds" class="input numin" min="0" max="600" step="1">
+            <span class="sunit">秒（0 表示不隐藏）</span>
+          </span>
+        </div>
+      </div>
+
+      <div class="sgroup">
+        <div class="sgroup-title">数据</div>
+        <div class="srow">
+          <span class="slabel">数据文件</span>
+          <span class="spath" id="pathText">—</span>
+          <button class="btn btn-sm" id="btnCopyPath">复制路径</button>
+        </div>
+        <div class="srow">
+          <span class="slabel">备份</span>
+          <span class="sctl gap">
+            <button class="btn btn-sm" id="btnExport">导出加密备份</button>
+            <button class="btn btn-sm" id="btnImport">导入备份</button>
+          </span>
+        </div>
+      </div>
+
+      <div class="sgroup">
+        <div class="sgroup-title">安全</div>
+        <div class="srow">
+          <span class="slabel">主密码</span>
+          <button class="btn btn-sm" id="btnChangeMaster">更换主密码</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<!-- 浏览器演示模式下显示当前视图的目标尺寸 -->
+<div class="size-tag" id="sizeTag"></div>
+
+<div id="modalRoot"></div>
+<div class="snack" id="toast"></div>
+
+<script src="logic.js"></script>
+<script src="api.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

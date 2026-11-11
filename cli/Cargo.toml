@@ -1,0 +1,20 @@
+[package]
+name = "passlet-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Passlet 命令行：查看与管理本地密码库"
+rust-version = "1.77"
+
+[[bin]]
+name = "passlet-cli"
+path = "src/main.rs"
+
+[dependencies]
+passlet-core = { path = "../core" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+arboard = "3"
+
+[dev-dependencies]
+serde_json = "1"
