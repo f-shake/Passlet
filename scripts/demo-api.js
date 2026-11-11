@@ -6,6 +6,11 @@
 
   const { validateEntry, validateMasterInput, validateBackupPassword, normalizeKey, clampInt } = root.PassletLogic;
 
+  // 预览里的插件内容由 build-preview.mjs 注入：直接拿仓库里的示例文件，
+  // 预览与真实插件就不会各写一份、慢慢跑偏。没注入时退化为空。
+  const DEMO_GENERATOR_SOURCE =
+    typeof __PASSLET_DEMO_GENERATOR_SOURCE__ === "string" ? __PASSLET_DEMO_GENERATOR_SOURCE__ : "";
+
   const fail = (code, message) => Promise.reject({ code, message });
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -118,6 +123,26 @@
         throw { code: "clipboard", message: "复制失败：系统剪贴板不可用。" };
       }
       return null;
+    },
+
+    async copy_generated({ text }) {
+      if (!String(text || "")) throw { code: "invalid", message: "没有可复制的密码。" };
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(text);
+      } catch {
+        throw { code: "clipboard", message: "复制失败：系统剪贴板不可用。" };
+      }
+      return null;
+    },
+
+    async list_generators() {
+      await sleep(60);
+      return {
+        dir: "C:\\Users\\autod\\Documents\\GitHub\\Passlet\\generators",
+        present: true,
+        files: [{ file: "example.js", source: DEMO_GENERATOR_SOURCE }],
+        warnings: []
+      };
     },
 
     async add_entry({ platform, username, password }) {

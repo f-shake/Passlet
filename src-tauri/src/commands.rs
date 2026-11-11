@@ -11,6 +11,7 @@ use tauri_plugin_dialog::DialogExt;
 use passlet_core::config::{self, Config};
 use passlet_core::crypto;
 use passlet_core::error::{AppError, AppResult};
+use passlet_core::generators::{self, GeneratorScan};
 use passlet_core::master;
 use passlet_core::paths;
 use passlet_core::storage;
@@ -20,6 +21,10 @@ use passlet_core::vault::{EntryMeta, MergeMode};
 use crate::session::{AppState, Session};
 
 const LOCKED: &str = "会话已锁定，请重新进入清单。";
+
+/// 按内容自适应时允许的高度范围：太低连一行输入框都放不下，太高就失去"小窗口"的意义。
+const MIN_CONTENT_HEIGHT: u32 = 200;
+const MAX_CONTENT_HEIGHT: u32 = 700;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -192,9 +197,14 @@ pub fn copy_secret(
             .map(|entry| entry.password.clone())
             .ok_or_else(|| AppError::new("not_found", "这条记录已经不在了，可能被删掉了。"))
     })?;
+    copy_with_autoclear(&app, state.inner(), password)
+}
 
+/// 写剪贴板，并按配置安排自动清空。
+/// 条目密码与生成的密码共用这一条路径，免得"自动清空"在两处各写一遍、行为慢慢跑偏。
+fn copy_with_autoclear(app: &AppHandle, state: &AppState, text: String) -> AppResult<()> {
     app.clipboard()
-        .write_text(password.clone())
+        .write_text(text.clone())
         .map_err(|err| AppError::new("clipboard", format!("复制失败：系统剪贴板不可用。（{err}）")))?;
 
     let config = config::load();
@@ -217,14 +227,33 @@ pub fn copy_secret(
             if current != seq {
                 return; // 期间又复制过，这次任务作废
             }
-            if let Ok(text) = handle.clipboard().read_text() {
-                if text == password {
+            if let Ok(now) = handle.clipboard().read_text() {
+                if now == text {
                     let _ = handle.clipboard().write_text(String::new());
                 }
             }
         });
     }
     Ok(())
+}
+
+/// 复制生成器算出的密码。它不来自库，所以单独一个口子，而不是硬塞进 copy_secret。
+#[tauri::command]
+pub fn copy_generated(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    text: String,
+) -> AppResult<()> {
+    if text.is_empty() {
+        return Err(AppError::new("invalid", "没有可复制的密码。"));
+    }
+    copy_with_autoclear(&app, state.inner(), text)
+}
+
+/// 列出插件目录里的生成器源码。只读磁盘、不执行脚本。
+#[tauri::command]
+pub fn list_generators() -> GeneratorScan {
+    generators::scan()
 }
 
 #[tauri::command]
@@ -365,12 +394,20 @@ pub fn clear_master_env() -> AppResult<MasterInfo> {
 }
 
 #[tauri::command]
-pub fn set_view(window: tauri::WebviewWindow, view: String) {
+pub fn set_view(window: tauri::WebviewWindow, view: String, height: Option<u32>) {
     let config = config::load();
-    let size = match view.as_str() {
+    let fallback = match view.as_str() {
         "list" => config.window_sizes.list,
         "settings" => config.window_sizes.settings,
+        "generator" => config.window_sizes.generator,
         _ => config.window_sizes.query,
+    };
+
+    // 生成视图的高度取决于插件声明了几个输入框，前端量完内容再传上来；
+    // 其它视图传 null，仍用 config 里记住的尺寸。
+    let size = match height {
+        Some(value) => [fallback[0], value.clamp(MIN_CONTENT_HEIGHT, MAX_CONTENT_HEIGHT)],
+        None => fallback,
     };
 
     // 记住当前窗口中心，换尺寸后仍用这个中心。

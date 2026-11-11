@@ -42,6 +42,15 @@ html = inline(
 );
 html = inline(html, '<script src="app.js"></script>', `<script>\n${read("app.js")}\n</script>`);
 
+// 预览里的示例插件直接用仓库里的真文件：两处各抄一份迟早会跑偏。
+// 占位符在 demo-api.js 里出现两次（typeof 判断 + 取值），所以用 replaceAll。
+const placeholder = "__PASSLET_DEMO_GENERATOR_SOURCE__";
+if (!html.includes(placeholder)) {
+  throw new Error("预览构建失败：demo-api.js 里找不到生成器占位符");
+}
+const exampleSource = readFileSync(resolve(root, "generators", "example.js"), "utf8");
+html = html.replaceAll(placeholder, () => JSON.stringify(exampleSource));
+
 mkdirSync(dirname(target), { recursive: true });
 writeFileSync(target, html, "utf8");
 

@@ -47,8 +47,8 @@ const jsCalls = parseJsCalls();
 
 describe("命令契约：前端调用与 Rust 形参一致", () => {
   it("能解析出两侧的清单（防止正则悄悄失效导致测试形同虚设）", () => {
-    expect(rustCommands.size).toBeGreaterThanOrEqual(14);
-    expect(jsCalls.size).toBeGreaterThanOrEqual(14);
+    expect(rustCommands.size).toBeGreaterThanOrEqual(23);
+    expect(jsCalls.size).toBeGreaterThanOrEqual(23);
   });
 
   it("前端调用的每个命令都在 Rust 侧存在", () => {

@@ -97,13 +97,15 @@ html.demo .size-tag{display:block;}
 html.demo .app-window[data-view="query"]{width:462px;height:272px;}
 html.demo .app-window[data-view="list"]{width:840px;height:474px;}
 html.demo .app-window[data-view="settings"]{width:620px;height:560px;}
+html.demo .app-window[data-view="generator"]{width:462px;height:380px;}
 html.demo .app-window[data-view="error"]{width:462px;height:272px;}
 
 .view{display:none;flex:1;min-height:0;flex-direction:column;}
 #app[data-view="error"] .view[data-view="error"],
 #app[data-view="query"] .view[data-view="query"],
 #app[data-view="list"] .view[data-view="list"],
-#app[data-view="settings"] .view[data-view="settings"]{display:flex;}
+#app[data-view="settings"] .view[data-view="settings"],
+#app[data-view="generator"] .view[data-view="generator"]{display:flex;}
 
 /* ---------- 统一控件尺寸 ----------
    daisyUI 的控件高度由 --size-field 派生，混用 .input-sm / .select-sm 会出现 30px 与 32px
@@ -530,3 +532,58 @@ html.demo .app-window[data-view="error"]{width:462px;height:272px;}
   border-color:var(--color-primary);
   color:var(--color-primary-content);
 }
+/* ---------- 生成密码视图 ---------- */
+/* 内容宽度按 462 定死：进入视图时窗口还停在上一个视图的宽度（清单页 840），
+   若让内容跟着窗口拉伸，量出来的高度是按 840 折行算的，切过去就会矮一截再跳一下。 */
+.gbody{flex:1;min-height:0;overflow-y:auto;padding:6px 18px 16px;max-width:462px;}
+.gfields{display:flex;flex-direction:column;}
+.gfield{display:flex;align-items:center;gap:10px;min-height:38px;padding:2px 0;}
+.gfield label{
+  width:118px;
+  flex:none;
+  white-space:nowrap;
+  color:color-mix(in oklab, var(--color-base-content) 62%, transparent);
+  font-size:12.5px;
+}
+.gfield .input{flex:1;min-width:0;}
+.gsingle{font-size:13px;font-weight:600;}
+.select-generator{width:220px;}
+.gresult{margin-top:10px;}
+.gresult .pwd-box{flex:1;min-width:0;overflow-x:auto;}
+/* 生成结果要一直看得见：这里的明文本就是给人核对规则的，不做显示/隐藏切换 */
+.gresult .pwd-box .plain{display:inline;white-space:nowrap;font-family:ui-monospace,Consolas,monospace;}
+.gerr{margin-top:10px;font-size:12px;line-height:1.5;color:var(--color-error);}
+.gempty{padding:8px 0 4px;}
+.gempty-title{font-size:13px;font-weight:600;margin:0 0 6px;}
+.gempty-text{
+  margin:0;
+  font-size:12px;
+  line-height:1.75;
+  color:color-mix(in oklab, var(--color-base-content) 55%, transparent);
+}
+.gempty-text code,
+.gfoot code,
+.gempty-path code{
+  font-size:11.5px;
+  padding:1px 5px;
+  border-radius:4px;
+  background:var(--color-base-200);
+}
+.gempty-path{display:flex;align-items:flex-start;gap:8px;margin-top:10px;}
+.gempty-path code{
+  flex:1;
+  min-width:0;
+  padding:5px 8px;
+  /* 路径很长时换行，不横向滚动：横向滚动条会把复制按钮挤出可视区 */
+  white-space:normal;
+  word-break:break-all;
+}
+.gfoot{
+  margin-top:12px;
+  padding-top:8px;
+  border-top:1px solid var(--color-base-200);
+  font-size:11.5px;
+  line-height:1.75;
+  color:color-mix(in oklab, var(--color-base-content) 48%, transparent);
+}
+.gfoot b{font-weight:600;color:var(--color-error);}

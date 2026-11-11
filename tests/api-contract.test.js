@@ -44,9 +44,14 @@ describe("会话命令", () => {
     expect(lastCall()).toEqual({ command: "lock", args: {} });
   });
 
-  it("setView 传 view", async () => {
+  it("setView 传 view，不传高度时显式给 null", async () => {
     await api.setView("list");
-    expect(lastCall()).toEqual({ command: "set_view", args: { view: "list" } });
+    expect(lastCall()).toEqual({ command: "set_view", args: { view: "list", height: null } });
+  });
+
+  it("setView 能把内容高度传给后端", async () => {
+    await api.setView("generator", 257);
+    expect(lastCall()).toEqual({ command: "set_view", args: { view: "generator", height: 257 } });
   });
 });
 

@@ -1122,4 +1122,300 @@ Q4 的落地口径：按容器格式，旧备份用当时的密码在技术上�
 | 验证 | CLI 端到端跑真实二进制：导出→错密码被拒且库文件字节不变→对密码导入还原；GUI 端用隔离 APPDATA 验了导出弹窗的两道校验与取消后库文件未变 |
 | 未自动化 | 系统保存/打开对话框无法可靠自动化（UIA 调用会卡在模态窗口上），GUI 侧“确实写盘/读盘”的往返由 CLI 端到端覆盖 |
 
+---
 
+## 追加需求：可插拔密码生成（2026-11-11 提出，待确认后实施）
+
+### P0 背景与已知输入
+
+用户原话（三次补充后）：用**自己定义的一套特殊规则**生成密码；生成器要**可插拔**，以后能加别的算法；
+插件用 **JS** 写（声明式规则表达不了后续算法）；插件**不提交 git**、仅本人使用，位置放**仓库内部**；
+**算密码是独立功能**——不记录“密码怎么来的”，也不把算出的密码存进库。
+
+行为参照：`O:\作品\开发\桌面程序\WPF\20160228-密码计算.zip`（2016 年 WPF 程序，只读参考）。
+它的规则是 `calculate(特征码)`：QWERTY 顺序 → `a`–`z` 的逐字符替换 + 首字符的变长二进制码后缀；
+未映射字符（大写、数字、符号）静默丢弃；空输入时 `sig[0]` 越界被 `catch` 吞掉；每次输入变化即重算并自动复制。
+那道 `md5(md5(md5(password)))` 门禁只是当年“只让自己用”的保护，Passlet 不复刻。
+
+### P1 功能需求
+
+| # | 需求（每条都能被一条用例验证） |
+|---|---|
+| F1 | 清单页工具栏有“生成”入口；点击进入独立的“生成密码”视图，可返回清单 |
+| F2 | 生成视图列出插件目录里全部可用生成器（按文件名、注册顺序）；选中后按插件声明的 `fields` 渲染输入框 |
+| F3 | 任一输入变化后结果区立即更新（不点按钮也更新）；字段全空时显示占位文案，不报错 |
+| F4 | 结果即时显示；**停止输入 1 秒**后自动写剪贴板，点“复制”也可立刻写；若“复制密码后自动清空”已开启，按现有秒数清空（与复制条目密码同一套逻辑） |
+| F5 | 插件目录里的 `*.js` 由后端读成文本、前端执行，插件调 `PassletGenerators.register(def)` 生效；新增插件无需改应用代码、无需重新编译 |
+| F6 | 插件定义不合法 / 语法错误 / 执行抛错 / 返回空串 / 超过 1024 字 / 含控制字符，各自给出明确中文提示，且**只影响该插件** |
+| F7 | 插件目录不存在或没有插件时显示空态：说明没有可用生成器，并显示当前生效的目录路径（可一键复制） |
+| F8 | 生成的密码**不写入库、不写入 config、不进导出备份**；离开视图即丢弃 |
+| F9 | 仓库自带一个示例插件（进 git）与接口说明；用户自己的插件文件被 `.gitignore` 排除 |
+| F10 | 插件目录解析顺序：`PASSLET_GENERATOR_DIR` → exe 同级 `generators\` → 调试构建回落仓库根 `generators\` |
+
+### P2 技术方案（选型 + 否决理由）
+
+**插件宿主 = WebView（前端执行）**
+
+- 选它：零新 Rust 依赖、不增加编译时间与体积、插件作者写的就是浏览器 JS、跨平台一致；
+  生成器只服务 GUI，不需要 CLI 参与。
+- 代价：`new Function` 需要 CSP 允许 `'unsafe-eval'`。现行 CSP 是 `default-src 'self'`，页面无任何远程内容、
+  也不渲染外来 HTML，评估为可接受。
+- 已知边界（写进 README）：插件运行在带 `window.__TAURI__` 的页面里，理论上能调用任意 IPC 命令（包括读库）。
+  插件目录只有本机用户可写，性质等同“信任自己写的代码”——这是可插拔的固有代价，不是遗漏。
+
+**否决的备选**
+
+| 方案 | 为什么不用 |
+|---|---|
+| 声明式规则文件 | 用户明确否决：后续算法表达不了 |
+| Rust 内嵌 JS 引擎（`boa_engine`） | 能让 CLI 也用上生成器、CSP 不用动，但要加一个大依赖、编译时间与体积明显上升；本轮生成器只服务 GUI。**留作以后要 CLI 支持时的备选** |
+| 原生 dll / WASM 插件 | ABI、工具链、崩溃风险的成本远超收益 |
+| Tauri `asset` 协议 + 动态 `<script>` 注入 | 能避开 `unsafe-eval`，但要在 `tauri.conf.json` 写死绝对路径 scope，开发与安装两种路径都得覆盖，配置太脆 |
+
+**自动复制的时机**：`AUTO_COPY_DELAY = 1000`（前端常量）。**不做设置项**——只多一个生成视图，
+加开关会让设置页和 `config.json` 都多一个字段，收益不足以抵掉这个面；要调再提。
+
+**插件接口契约（JS）**
+
+```js
+// generators/<任意文件名>.js —— 一个文件可注册多个生成器
+PassletGenerators.register({
+  id: "mine",                  // 必填，唯一；小写字母 / 数字 / 短横线
+  name: "我的特殊规则",          // 必填，下拉里显示
+  fields: [                    // 必填，可为空数组
+    { key: "feature", label: "账户特征码", placeholder: "例如 qwerty", required: true, maxLength: 200 }
+  ],
+  generate(inputs) {           // 必填；inputs = { 字段key: 字符串 }
+    return "算出来的密码";      // 必须返回字符串
+  }
+});
+```
+
+插件文件整体包在 `new Function("PassletGenerators", source)` 里执行：拿不到别的注入变量，
+但不能阻止它访问 `window`（见上面“已知边界”）。
+
+### P3 系统结构
+
+```
+index.html            新增 <section data-view="generator">（静态骨架，字段区动态渲染）
+   │
+app.js  ── 视图切换 / 渲染 / 事件 ─────────────┐
+   │                                          │
+   ├── api.listGenerators() ──→ invoke("list_generators")
+   │                                   │
+   ├── logic.js（纯函数，可单测）        │
+   │     createGeneratorRegistry()      │
+   │     loadGeneratorSource()          │
+   │     runGenerator()                 │
+   │     validateGeneratorInputs()      │
+   │                                   ↓
+   │                          commands.rs: list_generators
+   │                                   │
+   │                          core/generators.rs: scan() → { dir, present, files, warnings }
+   │                                   │
+   │                          std::fs 读 <dir>/*.js（只读，不改）
+   └── api.copyGenerated(text) ──→ invoke("copy_generated")  ← 复用自动清空剪贴板
+```
+
+### P4 数据结构
+
+```rust
+// core/src/generators.rs（新）
+pub struct GeneratorFile { pub file: String, pub source: String }
+pub struct GeneratorScan {
+    pub dir: String,                 // 当前生效目录（绝对路径，给界面显示）
+    pub present: bool,               // 目录是否存在
+    pub files: Vec<GeneratorFile>,   // 只含成功读到的 *.js，按文件名排序
+    pub warnings: Vec<String>,       // 逐个文件的跳过原因
+}
+pub const GENERATOR_DIR_NAME: &str = "generators";
+pub const MAX_SOURCE_BYTES: usize = 256 * 1024;
+```
+
+```rust
+// core/src/config.rs（改）
+pub const DEFAULT_GENERATOR: [u32; 2] = [462, 380];
+pub struct WindowSizes {
+    pub query: [u32; 2], pub list: [u32; 2], pub settings: [u32; 2],
+    #[serde(default = "default_generator_size")] pub generator: [u32; 2],  // 老 config.json 缺这个字段
+}
+```
+
+```js
+// frontend/logic.js（新，全部纯函数）
+GeneratorDef = { id: String, name: String, fields: FieldDef[], generate: Function }
+FieldDef     = { key: String, label: String, placeholder?: String, required?: Boolean, maxLength?: Number }
+// registry = { register(def), list(), get(id), errors: [{ file, message }] }
+```
+
+不新增库内类型：**条目模型、vault.dat、导出备份格式全部不变**。
+
+### P5 模块划分
+
+| 模块 | 负责 | **不负责** |
+|---|---|---|
+| `core/src/generators.rs` | 解析目录、枚举 `*.js`、读文本、给跳过原因 | 不解析 JS、不校验插件语义、不写任何文件 |
+| `commands.rs::list_generators` | 把 `GeneratorScan` 交给前端 | 不执行脚本、不缓存 |
+| `logic.js` 生成器段 | 注册表、定义校验、执行、结果校验、输入必填校验 | 不碰 DOM、不碰 Tauri、不碰剪贴板 |
+| `app.js` 生成视图 | 渲染、事件、状态、复制 | 不实现具体算法、不读文件系统 |
+| 插件文件（`generators/*.js`） | 只提供 `register(...)` 与 `generate()` | 不涉及存储、网络、剪贴板 |
+
+### P6 交互逻辑
+
+1. 清单工具栏点“生成” → `showView("generator")` → 窗口尺寸按 `windowSizes.generator`，中心点不动。
+2. 进入视图时调一次 `list_generators`（不缓存，改完插件切回来即是新结果）。
+3. 有插件：默认选中第一个；只有一个插件时不显示下拉，直接显示名字。
+4. 切生成器 → 清空输入区，按 `fields` 重建输入框，清空结果。
+5. 输入变化（`input` 事件）→ 校验必填 → `runGenerator` → 成功写进结果区，失败显示红色提示行。
+6. 每次输入变化都重置一个 **1000 ms** 防抖定时器（`AUTO_COPY_DELAY`）；到点时若结果有效且与“上次已复制的内容”不同，
+   调 `copy_generated(结果)` 并 toast「已复制」；开着自动清空时 toast 带「N 秒后自动清空」。
+7. 点“复制”按钮 → 立即复制（不再等防抖），同时把防抖定时器取消。
+8. 切生成器、清空输入、返回清单 → 取消防抖、清空“上次已复制”记录，避免把上一个生成器的结果复制出去。
+9. 返回清单 → 清空输入与结果。
+10. 空态：显示「还没有可用的生成器插件。」+ 目录路径 + 「复制路径」按钮 + 一句话指向 `generators/README.md`。
+
+### P7 异常情况（表现与提示文案）
+
+| 情况 | 表现 / 文案 |
+|---|---|
+| 目录不存在 | 空态 + 「插件目录：`<dir>`（不存在）」 |
+| 目录存在但没有 `*.js` | 空态 + 「插件目录里没有 `.js` 文件」 |
+| 文件读失败 | 该文件跳过；视图底部一行「`<file>` 读取失败：<原因>」 |
+| 超过 256 KB | 跳过 + 「`<file>` 太大（超过 256 KB），已跳过」 |
+| 非 UTF-8 | 跳过 + 「`<file>` 不是 UTF-8 文本，已跳过」 |
+| 调用 `register` 前抛错 / 语法错误 | 跳过 + 「`<file>` 加载失败：<message>」 |
+| 定义不合法（缺 id/name/generate、fields 不是数组） | 跳过 + 「`<file>` 里的生成器定义不完整：<原因>」 |
+| `id` 与已有生成器重复 | 后者跳过 + 「`<file>` 里的生成器 `<id>` 与已有生成器重名，已跳过」 |
+| `generate` 抛错 | 结果区红字「生成失败：<message>」 |
+| 返回非字符串或空串 | 「这个生成器没有返回密码。」 |
+| 结果超过 1024 字 | 「生成结果超过 1024 个字符，请检查规则。」 |
+| 结果含控制字符（`\x00`–`\x1f`、`\x7f`） | 「生成结果里有换行或控制字符，无法使用。」 |
+| 必填字段为空 | 结果区灰字「请先填写“<label>”。」 |
+| 剪贴板不可用 | 「复制失败：系统剪贴板不可用。」（沿用现有文案） |
+
+### P8 边界条件
+
+| 场景 | 约定 |
+|---|---|
+| 插件目录里混着子目录、`.md`、`.jsx` | 只认**直接位于目录内**、扩展名严格为 `.js` 的普通文件 |
+| 同一文件注册多个生成器 | 允许，各自独立校验；一个失败不影响同文件里其他已成功注册的 |
+| 空 `fields` | 允许（插件不需要输入），此时进入视图即生成一次结果 |
+| 输入首尾空格 | 原样传给插件（特征码可能就以空格结尾），不做 trim |
+| 单个字段超长 | 按 `maxLength`（缺省 200）截断，不报错 |
+| 老 `config.json` 缺 `windowSizes.generator` | 用默认 `[462, 380]`，**不得**回落成整份默认配置（否则主题、剪贴板设置全被重置） |
+| `windowSizes.generator` 被手改成非法值 | `sanitized()` 拉回 `[462, 380]` |
+| 结果很长（等于 1024） | 允许；界面横向可滚，不折行 |
+| 连续快速输入 | 防抖只兑现最后一次；中间结果不写剪贴板 |
+| 两次输入得到同一结果 | 不重复写剪贴板、不重复弹提示（`shouldAutoCopy` 拦住） |
+| 结果无效（必填空 / 抛错 / 超长） | 不动剪贴板，也不清空剪贴板里已有的内容 |
+
+### P9 修改范围（文件清单 · 基线）
+
+| 文件 | 动作 |
+|---|---|
+| `docs/PLAN.md` | 追加本节（计划产物，不算改动） |
+| `.gitignore` | `/generators/*.js` + `!/generators/example.js` |
+| `core/src/generators.rs` | **新增**：目录解析、扫描、读文件 |
+| `core/src/lib.rs` | 注册 `pub mod generators;` |
+| `core/src/config.rs` | `WindowSizes.generator` + 默认值 + 净化 + 测试 |
+| `src-tauri/src/commands.rs` | 新增 `list_generators`、`copy_generated`（把 `copy_secret` 的清空逻辑抽成内部函数共用） |
+| `src-tauri/src/lib.rs` | 注册两个命令 |
+| `src-tauri/tauri.conf.json` | CSP 加 `'unsafe-eval'` |
+| `frontend/index.html` | 生成视图 section + 入口按钮 |
+| `frontend/logic.js` | 注册表 / 校验 / 执行 / 结果校验（纯函数） |
+| `frontend/api.js` | `listGenerators()`、`copyGenerated(text)` |
+| `frontend/app.js` | 生成视图渲染与事件、`SIZES.generator` |
+| `frontend/styles.css` | 生成视图样式（结果区、字段行、空态） |
+| `generators/README.md` | **新增**：接口契约、目录规则、风险说明（进 git） |
+| `generators/example.js` | **新增**：示例插件（进 git，算法与用户真实规则无关） |
+| `generators/keyboard-order.js` | **新增**：用户的真实规则（照搬 2016 算法，**不进 git**，见 Q5） |
+| `tests/generator.test.js` | **新增**：前端纯函数单测 |
+| `tests/command-contract.test.js` | 解析阈值随命令数上调 |
+| `scripts/demo-api.js` | 演示模式补 `list_generators` / `copy_generated` 假实现 |
+| `README.md` | 一小节：插件放哪、怎么写、有什么风险 |
+
+不动：`core/src/{store,vault,crypto,master,storage,scratch,paths}.rs`、`cli/`、vault.dat 容器格式、导出备份格式。
+
+### P10 实现步骤
+
+1. `core/src/generators.rs`：目录解析 + 扫描 + 单测（含 env 覆盖、大小上限、非 UTF-8、目录缺失）。
+2. `core/src/config.rs`：加 `generator` 尺寸并补兼容测试（缺字段、非法值）。
+3. `commands.rs` + `lib.rs`：`list_generators`；把剪贴板清空逻辑抽成 `write_with_autoclear`，新增 `copy_generated`。
+4. `tauri.conf.json`：CSP 加 `'unsafe-eval'`。
+5. `logic.js`：注册表、`loadGeneratorSource`、`validateGeneratorDef`、`runGenerator`、`validateGeneratorInputs`。
+6. `tests/generator.test.js`：把第 5 步全部覆盖（含异常码与文案）。
+7. `index.html` + `app.js` + `styles.css`：生成视图、入口按钮、渲染与事件、`SIZES.generator`。
+8. `api.js` + `scripts/demo-api.js`：新命令的通道与演示替身；跑一次 `pnpm preview` 确认预览不坏。
+9. `generators/README.md` + `generators/example.js`（示例用与真实规则无关的简单算法）；`.gitignore`。
+10. `generators/keyboard-order.js`：照搬 2016 算法（`id` = `keyboard-order`，显示名「键盘序替换」），确认 `git status` 里看不到它。
+11. `README.md` 补一小节；`pnpm test` + `cargo test --workspace -- --test-threads=1` 自测。
+
+### P11 测试方案
+
+| 层 | 用例 |
+|---|---|
+| core 单测（`generators.rs`） | env 覆盖生效；exe 同级目录优先；调试构建回落仓库根；只收 `.js`；按文件名排序；超 256 KB 跳过并给 warning；非 UTF-8 跳过；目录缺失 → `present=false` 且不报错 |
+| core 单测（`config.rs`） | 新增 `generator` 默认值；老 JSON（缺该字段）能读且**不**回落整份默认；非法值被拉回 |
+| 前端单测（`tests/generator.test.js`） | 正常注册与 `list()` 顺序；缺 id/name/generate 各报 `gen_bad_def`；重复 id 报 `gen_dup_id`；语法错误报 `gen_syntax`；注册期抛错报 `gen_throw`；`generate` 无参调用；返回非字符串 / 空串 → `gen_empty`；1024 允许、1025 → `gen_too_long`；控制字符 → `gen_control_chars`；必填空 → `gen_missing_field`；空 `fields` 直接可跑；`maxLength` 截断；`shouldAutoCopy` 对新结果返回真、对同一结果返回假 |
+| 契约测试 | `list_generators` / `copy_generated` 两侧形参逐字一致；命令数阈值上调 |
+| GUI 集成 | `list_generators` 在真实 APPDATA 下返回 `present=false` 的干净路径；`copy_generated` 写进剪贴板并按配置清空 |
+| 端到端（UIA） | 清单 → 生成视图（尺寸正确）；`keyboard-order` 被列出；填特征码得到**与独立实现算出的黄金值一致**的结果；**停止输入约 1.2 秒后剪贴板自动变成最终结果**（连续输入时中间结果一律不落剪贴板）；点复制后剪贴板内容一致；放一个坏插件文件 → 只出现一条错误、其余插件仍能用；把目录改名 → 空态与路径显示正确 |
+| 手工 | `pnpm dev` 下改插件文件、切视图回来即生效（不重启） |
+
+端到端里“黄金值”由 PowerShell 独立实现老 `calculate` 算出，不复用应用代码，避免自证。
+
+### 附：已定决策（原 Q1–Q5，2026-11-11 已确认）
+
+| # | 问题 | 决定 |
+|---|---|---|
+| Q1 | 插件在 git 里怎么处置 | **A**：`generators/` 目录进 git（`README.md` + `example.js`），`/generators/*.js` 忽略、`!generators/example.js` 放行。真实插件不进库；`git clean -fdx` 会把它删掉，已知 |
+| Q2 | JS 在哪执行 | **A**：WebView `new Function` + CSP `'unsafe-eval'`。插件能访问 `window.__TAURI__`，作为已知边界写进 README |
+| Q3 | 部署后怎么找到插件 | **A**：`PASSLET_GENERATOR_DIR` → exe 同级 `generators\` → 调试构建回落仓库根；部署到 `C:\Running\Passlet` 时把 `generators\` 拷一份过去（README 写一行，不加脚本） |
+| Q4 | 生成后是否自动复制 | **A + 停键盘 1 秒自动复制**：输入变化立即出结果；1000 ms 防抖到点自动写剪贴板；“复制”按钮随时可点；结果与上次已复制的相同则不重复写、不重复提示 |
+| Q5 | 2016 规则要不要照搬 | **A**：照搬，落到 `generators/keyboard-order.js`（不进 git）。文件名与 `id` 按原理命名 `keyboard-order`，显示名「键盘序替换」。三个边界坑按老行为走：未映射字符丢弃、空输入得空串、首字符不在码表则无后缀 |
+
+未决项：**无**。
+
+### P12 实施记录（2026-11-11）
+
+| 项 | 结果 |
+|---|---|
+| 插件目录解析 | `core/src/generators.rs`：`PASSLET_GENERATOR_DIR` → exe 同级 `generators\`（存在才用） → 调试构建回落仓库根；只收目录内直接躺着的 `*.js`，单文件上限 256 KB，非 UTF-8 与读失败都记 warning 跳过 |
+| 命令 | `list_generators` 返回 `{ dir, present, files, warnings }`；`copy_generated` 与 `copy_secret` 共用 `copy_with_autoclear`（自动清空逻辑只此一份） |
+| 前端执行 | `logic.js`：注册表、`loadGeneratorSource`（`new Function` 只注入 `PassletGenerators`）、结果校验（空串/超 1024/控制字符）、`shouldAutoCopy`、`clampFieldValue`；`app.js`：生成视图渲染与事件 |
+| CSP | `script-src 'self' 'unsafe-eval'`（`new Function` 需要；页面无远程内容） |
+| 配置 | `windowSizes.generator = [462, 380]`；老 `config.json` 缺该字段时**只补这一项**（有专门测试，防止整份配置被重置） |
+| 窗口尺寸 | `set_view` 增加 `"generator"` 分支——**这是实施中发现并修掉的缺陷**：原 `match` 会把它落到 query 尺寸 |
+| 生成视图高度 | **改为按内容自适应**（实施中改的）：`set_view` 收一个可选的 `height`，前端量完可见内容的高度再传上来，Rust 侧夹到 200~700；其它视图传 `null` 仍用 config 尺寸。起因是固定 380 在只有一个输入框的插件下留了一大片空白。提示行出现/消失时也会重量一次（合并到同一轮渲染，只改一次窗口） |
+| 插件文件 | `generators/example.js` 与 `generators/README.md` 进库；`generators/keyboard-order.js` 被 `.gitignore` 排除（`git check-ignore -v` 验证） |
+| 演示模式 | `build-preview.mjs` 把 `example.js` 注入 `demo-api.js` 的占位符，预览与真插件不会各写一份 |
+| 前端美化修正 | 空态时隐藏结果行；空态路径改成换行显示（原横向滚动会把“复制路径”挤出可视区） |
+| 无输入字段的插件 | 进视图即出结果，但**不自动复制**——打开一个页面就改写剪贴板不划算，与 P6 第 3 步原文略有出入 |
+| 新增测试 | core `generators` 11 条、`config` 新增 2 条（老配置兼容、越界回落）；前端 `tests/generator.test.js` 28 条；契约测试自动纳入两个新命令 |
+| 端到端（UIA） | 5 个场景全通过：单插件（黄金值 `qwerty → abcdef1101`，独立实现算出）、防抖（三次连续改动，中间值一次都没进剪贴板）、坏插件（一条错误、好插件仍可用）、多插件（下拉列出两个，切到「键盘序替换」后窗口高度随之从 596×416 收到 596×368）、空态（文案 + 路径） |
+| 计划修正 | ① 原写语法错误有 `gen_syntax` 码，实现里加载失败只记文案，测试改为断言文案；② `copy_generated` 增加空串拒绝（`invalid`）；③ 自动复制改为用户拍板的“停输入 1 秒” |
+| 未自动化 | WebView2 里 `SendKeys` 真实按键无效（改用 `ValuePattern.SetValue`，它会触发页面的 `input` 事件）；下拉切换靠 UIA 展开后选 ListItem |
+| 自测 | 前端 100 条全绿；core 相关模块测试全绿；`cargo build -p passlet` 通过 |
+### P13 复核修复记录（2026-11-11，阶段三）
+
+独立子代理第一轮报 10 条，主代理逐条复核后**全部判定属实**（无驳回项），修完回送同一子代理逐条回执，
+9 条一次通过，第 6 条被判「仍存在」后按它指的方向重改，第二轮回「已修复」——**收敛**。
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | 进入生成视图就会自动改写剪贴板（字段都非必填时） | 进视图/切换生成器一律 `runGeneratorNow(false)`，只有真正的输入事件才排防抖 |
+| 2 | 高度按旧窗口宽度量、不算 `scrollTop`、切宽后不重量 | `.gbody` 加 `max-width:462px`（配合 `box-sizing:border-box`，折行与收窄后一致）；量高度补 `body.scrollTop`；尺寸落地后再量一次 |
+| 3 | 安装包里没有 `generators\`，根 README 也没写 | README 补三条：目录不在安装包里、拷到 exe 同级或设 `PASSLET_GENERATOR_DIR`、开发时自动读仓库根（按 Q3 口径，不往 `bundle.resources` 塞目录） |
+| 4 | 必填为空显示红字错误行，一进视图就报红 | 新增 `showGeneratorHint` 写结果区灰色占位（`GEN_IDLE_HINT` 复位默认文案）；红字只留给生成失败/结果非法/剪贴板失败 |
+| 5 | 离开视图只清状态，明文留在隐藏 DOM | `resetGenerator` 一并复位提示行、占位、结果文本与复制按钮 |
+| 6 | 每次进视图发两条 `set_view` | `syncGeneratorSize` 形参 `force` → `delay`，比对无条件执行；`showView` 先把高度记进 `S.genSentHeight` 再发，落地后重量相同即 return |
+| 7 | 契约测试命令数阈值仍是 14 | 升至 23 |
+| 8 | 「作用域只注入 PassletGenerators」用例名不副实 | 改为断言闭包内名字（`clampInt`、`createGeneratorRegistry`）取不到 |
+| 9 | `generators/README.md` 整篇用 `//` 注释写法 | 重写为 Markdown（标题、列表、```js 代码块） |
+| 10 | 预览 `?view=` 钩子不含生成视图 | 白名单加 `generator` |
+
+复核同时确认**没有问题**、按原样保留的点：CSP 只多 `unsafe-eval`（未加 `unsafe-inline`）；
+`copy_with_autoclear` 与重构前逐行等价（`seq` 自增位置、读回比对、作废判定）；生成的密码没有任何路径碰库；
+老 `config.json` 兼容只补 `generator` 一项；目录解析三来源与 F10 一致；插件给的所有文案都过 `esc()`。
+
+修复后自测：前端 4 个测试文件 101 条全绿；重建后 E2E 5 个场景全过（新增「进视图不自动复制」「清空后回到灰字提示且不改写剪贴板」两条断言）。

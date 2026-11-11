@@ -10,6 +10,7 @@ pub const CONFIG_NAME: &str = "config.json";
 pub const DEFAULT_QUERY: [u32; 2] = [462, 272];
 pub const DEFAULT_LIST: [u32; 2] = [840, 474];
 pub const DEFAULT_SETTINGS: [u32; 2] = [620, 560];
+pub const DEFAULT_GENERATOR: [u32; 2] = [462, 380];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +18,14 @@ pub struct WindowSizes {
     pub query: [u32; 2],
     pub list: [u32; 2],
     pub settings: [u32; 2],
+    /// 后面才加的字段：老 config.json 里没有它。
+    /// 缺字段时只补这一项默认值，不能让整份配置回落默认——否则主题、剪贴板设置会被一起重置。
+    #[serde(default = "default_generator_size")]
+    pub generator: [u32; 2],
+}
+
+fn default_generator_size() -> [u32; 2] {
+    DEFAULT_GENERATOR
 }
 
 impl Default for WindowSizes {
@@ -25,6 +34,7 @@ impl Default for WindowSizes {
             query: DEFAULT_QUERY,
             list: DEFAULT_LIST,
             settings: DEFAULT_SETTINGS,
+            generator: DEFAULT_GENERATOR,
         }
     }
 }
@@ -82,6 +92,7 @@ impl Config {
         self.window_sizes.query = clamp_size(self.window_sizes.query, DEFAULT_QUERY);
         self.window_sizes.list = clamp_size(self.window_sizes.list, DEFAULT_LIST);
         self.window_sizes.settings = clamp_size(self.window_sizes.settings, DEFAULT_SETTINGS);
+        self.window_sizes.generator = clamp_size(self.window_sizes.generator, DEFAULT_GENERATOR);
         self.version = 1;
         self
     }
@@ -145,6 +156,34 @@ mod tests {
         assert_eq!(config.window_sizes.query, [462, 272]);
         assert_eq!(config.window_sizes.list, [840, 474]);
         assert_eq!(config.window_sizes.settings, [620, 560]);
+        assert_eq!(config.window_sizes.generator, [462, 380]);
+    }
+
+    #[test]
+    fn 老配置缺少生成视图尺寸时只补这一项() {
+        // 这是真实会遇到的升级场景：用户的 config.json 是上个版本写的，没有 generator
+        let dir = temp_dir("legacy-sizes");
+        fs::write(
+            dir.join("config.json"),
+            r#"{"version":1,"theme":"dark","clipboardClearEnabled":false,"clipboardClearSeconds":5,"hidePasswordSeconds":0,"windowSizes":{"query":[462,272],"list":[840,474],"settings":[620,560]}}"#,
+        )
+        .unwrap();
+
+        let loaded = load_in(&dir);
+        assert_eq!(loaded.window_sizes.generator, DEFAULT_GENERATOR);
+        // 整份配置不能被重置：这几项都必须活着
+        assert_eq!(loaded.theme, "dark");
+        assert_eq!(loaded.clipboard_clear_enabled, false);
+        assert_eq!(loaded.clipboard_clear_seconds, 5);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 生成视图尺寸越界回落默认() {
+        let mut config = Config::default();
+        config.window_sizes.generator = [10, 10000];
+        assert_eq!(config.sanitized().window_sizes.generator, DEFAULT_GENERATOR);
     }
 
     #[test]

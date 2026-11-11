@@ -19,6 +19,10 @@ vault.dat.bak
 vault.dat.bak.*
 config.json
 
+# 生成器插件：仓库只留接口文档与示例，自己的规则不进版本库
+/generators/*.js
+!/generators/example.js
+
 # 编辑器
 .vscode/
 .idea/

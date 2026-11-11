@@ -96,6 +96,14 @@
         <input class="input" id="filterInput" type="text" placeholder="搜索平台或用户名" autocomplete="off" spellcheck="false">
       </div>
       <button class="btn btn-sm btn-primary" id="btnAdd">＋ 新增</button>
+      <button class="btn btn-ghost btn-sm btn-square" id="btnGenerator" title="生成密码">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="8" cy="15.5" r="3.8"></circle>
+          <path d="M10.8 12.8L19 4.6"></path>
+          <path d="M16 6.8l2.4 2.4"></path>
+          <path d="M18.6 4.2l2.2 2.2"></path>
+        </svg>
+      </button>
       <button class="btn btn-ghost btn-sm btn-square" id="btnSettings" title="设置">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3.2"></circle>
@@ -205,6 +213,49 @@
           </span>
         </div>
       </div>
+    </div>
+  </section>
+
+  <!-- ============ 生成密码视图 ============ -->
+  <section class="view" data-view="generator">
+    <div class="toolbar">
+      <button class="btn btn-ghost btn-sm btn-square" id="btnBackFromGenerator" title="返回清单">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"></path></svg>
+      </button>
+      <span class="toolbar-title">生成密码</span>
+    </div>
+
+    <div class="gbody">
+      <div class="srow" id="genPickRow" hidden>
+        <span class="slabel">生成器</span>
+        <select class="select select-generator" id="selGenerator"></select>
+        <span class="gsingle" id="genSingleName" hidden></span>
+      </div>
+
+      <div class="gfields" id="genFields"></div>
+
+      <div class="pwd-wrap gresult" id="genResultRow">
+        <div class="pwd-box input empty" id="genResultBox">
+          <span class="ph" id="genPlaceholder">填写上面的输入后自动生成</span>
+          <span class="plain" id="genResultText"></span>
+        </div>
+        <button class="btn btn-ghost btn-sm btn-square" id="btnGenCopy" title="复制" disabled>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M15 6.5V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h.5"></path></svg>
+        </button>
+      </div>
+
+      <div class="gerr" id="genProblem" hidden></div>
+
+      <div class="gempty" id="genEmpty" hidden>
+        <p class="gempty-title">还没有可用的生成器插件</p>
+        <p class="gempty-text">插件是 <code>generators</code> 目录里的 <code>.js</code> 文件；写法与示例见该目录的 <code>README.md</code>。</p>
+        <div class="gempty-path">
+          <code id="genDir">—</code>
+          <button class="btn btn-sm" id="btnCopyGenDir">复制路径</button>
+        </div>
+      </div>
+
+      <div class="gfoot" id="genFoot" hidden></div>
     </div>
   </section>
 

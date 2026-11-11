@@ -83,6 +83,15 @@ setx PASSLET_MASTER "你的主密码"
 - 数据文件路径、导出加密备份、导入备份
 - 主密码：查看环境变量来源、设置/更新、清除、更换主密码
 
+**生成密码**（清单页工具栏的钥匙图标）
+
+- 规则来自 `generators/` 目录里的 `.js` 插件，可以放自己的算法；没有插件时这一页只显示说明
+- 输入变化就实时算，**停止输入约一秒后自动复制**；旁边的按钮可以立刻复制
+- 算出来的密码不写进 `vault.dat`，也不进备份——它和条目没有关系，只是一个独立的计算器
+- 插件怎么写、有什么风险，见 `generators/README.md`
+- **插件目录不在安装包里**（`frontendDist` 是嵌进二进制的）。把仓库里的 `generators\` 拷到
+  `passlet.exe` 同级，或在环境变量 `PASSLET_GENERATOR_DIR` 里指向它；开发时（`pnpm dev`）自动读仓库根那份
+
 ---
 
 ## 数据文件与备份
@@ -205,7 +214,9 @@ Copy-Item -Recurse -Force .\skill\passlet-cli "$env:USERPROFILE\.dsh\skills\pass
 - 同时开两个实例时，**后保存的会覆盖先保存的**（没有做文件锁）
 - 新增/编辑弹窗关掉时不会提示"未保存"，改动直接丢弃
 - 程序退出不清理剪贴板
-- 托盘常驻、密码生成器、密码强度提示都没有（不在 v1 范围内）
+- 托盘常驻、密码强度提示都没有（不在 v1 范围内）
+- 生成密码的插件在 WebView 里执行：它能访问 `window`，理论上也能调用应用的命令（包括读库）。
+  插件目录只有本机用户可写，性质等同“信任自己写的代码”——别把来路不明的插件放进去
 - 只有界面语言是中文，没有做多语言
 
 ---
@@ -225,6 +236,7 @@ core/              passlet-core：加密、存储、条目模型、配置（不�
 src-tauri/         GUI 外壳与 Tauri 命令
 cli/               passlet-cli：命令行入口（只依赖 core，产物 0.5 MB）
 skill/             passlet-cli 的 AI skill
+generators/        生成密码的插件：README + 示例进库，自己的 *.js 被忽略
 tests/             前端单测（vitest）
 scripts/           构建预览、设置环境变量、生成启动脚本
 docs/PLAN.md       设计与决策记录

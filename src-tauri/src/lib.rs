@@ -17,6 +17,8 @@ pub fn run() {
             commands::get_secret,
             commands::copy_secret,
             commands::copy_text,
+            commands::copy_generated,
+            commands::list_generators,
             commands::add_entry,
             commands::update_entry,
             commands::delete_entry,

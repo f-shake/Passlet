@@ -14,7 +14,13 @@ const {
   validateEntry,
   validateMasterInput,
   validateBackupPassword,
-  masterStateLines
+  masterStateLines,
+  createGeneratorRegistry,
+  loadGeneratorSource,
+  validateGeneratorInputs,
+  runGenerator,
+  shouldAutoCopy,
+  clampFieldValue
 } = globalThis.PassletLogic;
 
 /* ============================================================
@@ -34,8 +40,15 @@ const SIZES = {
   error: [462, 272],
   query: [462, 272],
   list: [840, 474],
-  settings: [620, 560]
+  settings: [620, 560],
+  generator: [462, 380]
 };
+
+// 停止输入多久之后自动写剪贴板。不到一秒会让"边打边算"的中间结果一路刷进剪贴板。
+const AUTO_COPY_DELAY = 1000;
+
+// 生成视图结果区在"还没有结果"时显示的占位文案
+const GEN_IDLE_HINT = "填写上面的输入后自动生成";
 
 /* ============================================================
    状态
@@ -56,6 +69,18 @@ const S = {
   master: null,
   // 换主密码后环境变量没写成功时置位：这一行要一直提醒到下次写入成功
   masterSyncFailed: false,
+  // 生成器插件：每次进视图都重新扫描，改完插件文件不必重启
+  generators: [],
+  gen: null,
+  genInputs: {},
+  genResult: "",
+  genCopied: "",
+  genTimer: null,
+  genSizeTimer: null,
+  // 上一次告诉后端的生成视图高度：宽度变了要重量，但只有真的变了才再发一次
+  genSentHeight: 0,
+  genDir: "",
+  genProblems: [],
 };
 
 /* ============================================================
@@ -136,6 +161,8 @@ async function showView(view) {
     S.rowTimers.forEach(timer => clearTimeout(timer));
     S.rowTimers.clear();
     clearTimeout(S.pwdTimer);
+    // 离开生成视图就把结果丢掉：它不该跟着会话留在内存里
+    if (S.view === "generator") resetGenerator();
   }
 
   S.view = view;
@@ -150,6 +177,7 @@ async function showView(view) {
   renderQueryCombos();
   if (view === "list") renderList();
   if (view === "settings") renderSettings();
+  if (view === "generator") await loadGenerators();
 
   // 回到查询页只丢掉 WebView 里缓存的明文。
   // 不要在这里 lock()——查询页本身要靠 get_secret 取密码显示，
@@ -158,7 +186,12 @@ async function showView(view) {
     S.secrets.clear();
     renderPassword();
   }
-  await api.setView(view);
+  const height = view === "generator" ? generatorContentHeight() : null;
+  if (height) S.genSentHeight = height;
+  await api.setView(view, height);
+  // 刚量到的高度是按"上一个视图的宽度"算的（清单页 840 宽），窗口收窄后文字可能多折一行。
+  // 等尺寸落地再量一次；比对用的是 showView 自己刚发出去的那个值，没变就不补发。
+  if (view === "generator") syncGeneratorSize(60);
 }
 
 // 进程退出时尽力通知后端丢弃密钥（收不到也无所谓：进程结束 Zeroizing 会自动清零）
@@ -1203,6 +1236,292 @@ $("#btnChangeMaster").addEventListener("click", () =>
 );
 
 /* ============================================================
+   生成密码视图
+   ============================================================ */
+
+/** 每次进视图都重新扫一遍插件目录：改完插件文件切回来就是新结果，不必重启。 */
+async function loadGenerators() {
+  resetGenerator();
+  const scan = await guard(() => api.listGenerators());
+
+  S.generators = [];
+  S.genProblems = [];
+  S.genDir = scan ? scan.dir : "";
+
+  if (scan) {
+    const registry = createGeneratorRegistry();
+    for (const file of scan.files) loadGeneratorSource(registry, file.source, file.file);
+    S.generators = registry.list();
+    S.genProblems = registry.problems();
+    for (const warning of scan.warnings) S.genProblems.push({ file: "", message: warning });
+  }
+
+  S.gen = S.generators.length ? S.generators[0] : null;
+  renderGenerator();
+}
+
+function renderGenerator() {
+  const hasGenerator = S.generators.length > 0;
+  $("#genPickRow").hidden = !hasGenerator;
+  $("#genResultRow").hidden = !hasGenerator;
+  $("#genEmpty").hidden = hasGenerator;
+  $("#genDir").textContent = S.genDir || "—";
+
+  if (hasGenerator) {
+    const select = $("#selGenerator");
+    const single = S.generators.length === 1;
+    select.hidden = single;
+    $("#genSingleName").hidden = !single;
+    if (single) {
+      $("#genSingleName").textContent = S.generators[0].name;
+    } else {
+      select.innerHTML = S.generators
+        .map(item => `<option value="${esc(item.id)}">${esc(item.name)}</option>`)
+        .join("");
+      select.value = S.gen.id;
+    }
+  }
+
+  renderGeneratorFields();
+  renderGeneratorResult();
+  renderGeneratorFoot();
+}
+
+/**
+ * 生成视图的高度要跟着内容走：插件声明几个输入框是它的事，
+ * 窗口不该为"可能的字段数"留一片死白。
+ */
+function generatorContentHeight() {
+  const view = document.querySelector('.view[data-view="generator"]');
+  if (!view) return null;
+  const body = view.querySelector(".gbody");
+  const children = Array.from(body.children).filter(el => !el.hidden);
+  if (!children.length) return null;
+
+  const app = document.getElementById("app");
+  const top = app.getBoundingClientRect().top;
+  const bottom = Math.max(...children.map(el => el.getBoundingClientRect().bottom));
+  // 内容被后端上限夹住后 .gbody 会出现滚动条，滚过之后子元素在视口里整体上移，
+  // 只靠 bottom - top 会越量越矮，而窗口是 resizable:false，量矮了用户改不回来。
+  const scrolled = body.scrollTop || 0;
+  // .gbody 的下内边距是 16px：最后一行不能贴着窗口边
+  return Math.ceil(bottom - top + scrolled + 16);
+}
+
+/**
+ * 把当前内容高度同步给后端。
+ * 一律与"上一次发出去的高度"比对，值没变就不发——切生成器、提示行显隐都会走到这里，
+ * 不该每次都多一条 IPC 和一次窗口重设。
+ * `delay` 只用于"等窗口尺寸落地后再量"的场合，不改变比对规则。
+ */
+function syncGeneratorSize(delay = 0) {
+  if (S.view !== "generator") return;
+  clearTimeout(S.genSizeTimer);
+  // 合并同一轮渲染里的多次调用：量一次、改一次窗口，避免连着重设尺寸
+  S.genSizeTimer = setTimeout(async () => {
+    S.genSizeTimer = null;
+    if (S.view !== "generator") return;
+    const height = generatorContentHeight();
+    if (!height) return;
+    if (height === S.genSentHeight) return;
+    S.genSentHeight = height;
+    try {
+      await api.setView("generator", height);
+    } catch {
+      // 尺寸没设上不影响生成，下次渲染还会再试
+    }
+  }, delay);
+}
+
+function renderGeneratorFields() {
+  const box = $("#genFields");
+  const def = S.gen;
+
+  if (!def || !def.fields.length) {
+    box.innerHTML = "";
+    // 不需要输入的生成器：进视图就出结果，但不自动复制——
+    // 打开一个页面就改写用户的剪贴板，代价比省一次点击大。
+    runGeneratorNow(false);
+    return;
+  }
+
+  box.innerHTML = def.fields.map(field => `
+    <div class="gfield">
+      <label for="gf_${esc(field.key)}">${esc(field.label)}</label>
+      <input class="input" id="gf_${esc(field.key)}" data-field="${esc(field.key)}"
+        type="text" autocomplete="off" spellcheck="false"
+        maxlength="${field.maxLength}"
+        placeholder="${esc(field.placeholder)}"
+        value="${esc(S.genInputs[field.key] || "")}">
+    </div>`).join("");
+
+  // 进视图/切换生成器时不算"用户输入变化"：字段全是选填的插件会在空输入下也算出结果，
+  // 这时候改写剪贴板等于把用户刚复制的条目密码顶掉。
+  runGeneratorNow(false);
+}
+
+/** 结果区占位行：必填没填属于“还没轮到算”，用灰字提示，不要拿红字吓人。 */
+function showGeneratorHint(text) {
+  const placeholder = $("#genPlaceholder");
+  placeholder.textContent = text || GEN_IDLE_HINT;
+  // 提示只占位不显示结果，两者不会同时出现
+  if (text) renderGeneratorResult();
+}
+
+function showGeneratorProblem(text) {
+  const box = $("#genProblem");
+  const wasHidden = box.hidden;
+  box.textContent = text || "";
+  box.hidden = !text;
+  // 提示行出现/消失会改变内容高度，只在真的变了时重量一次
+  if (wasHidden !== box.hidden) syncGeneratorSize();
+}
+
+function renderGeneratorResult() {
+  const text = S.genResult;
+  $("#genResultText").textContent = text;
+  $("#genResultBox").classList.toggle("empty", !text);
+  $("#btnGenCopy").disabled = !text;
+}
+
+function renderGeneratorFoot() {
+  const foot = $("#genFoot");
+  const lines = S.genProblems.map(problem => esc(problem.message));
+  if (S.generators.length) lines.push(`插件目录：<code>${esc(S.genDir)}</code>`);
+  foot.innerHTML = lines.join("<br>");
+  foot.hidden = lines.length === 0;
+}
+
+/** 跑一次并把结果放上界面；防抖交给 scheduleAutoCopy。 */
+function runGeneratorNow(autoCopy) {
+  clearTimeout(S.genTimer);
+  S.genTimer = null;
+
+  const def = S.gen;
+  if (!def) {
+    S.genResult = "";
+    showGeneratorProblem("");
+    showGeneratorHint("");
+    renderGeneratorResult();
+    return;
+  }
+
+  const missing = validateGeneratorInputs(def, S.genInputs);
+  if (missing) {
+    S.genResult = "";
+    showGeneratorProblem("");
+    showGeneratorHint(missing);
+    renderGeneratorResult();
+    return;
+  }
+
+  const result = runGenerator(def, S.genInputs);
+  if (!result.ok) {
+    S.genResult = "";
+    showGeneratorProblem(result.message);
+    renderGeneratorResult();
+    return;
+  }
+
+  S.genResult = result.value;
+  showGeneratorProblem("");
+  showGeneratorHint("");
+  renderGeneratorResult();
+  if (autoCopy) scheduleAutoCopy();
+}
+
+/** 停止输入一会儿再写剪贴板：边打边算的中间结果不该进剪贴板。 */
+function scheduleAutoCopy() {
+  clearTimeout(S.genTimer);
+  S.genTimer = null;
+  if (!shouldAutoCopy(S.genResult, S.genCopied)) return;
+  S.genTimer = setTimeout(() => {
+    S.genTimer = null;
+    copyGeneratorResult(false);
+  }, AUTO_COPY_DELAY);
+}
+
+async function copyGeneratorResult(manual) {
+  clearTimeout(S.genTimer);
+  S.genTimer = null;
+
+  const text = S.genResult;
+  if (!text) return;
+
+  try {
+    await api.copyGenerated(text);
+  } catch (err) {
+    showGeneratorProblem(err && err.message ? err.message : String(err));
+    return;
+  }
+
+  S.genCopied = text;
+  showGeneratorProblem("");
+  const tail = S.config && S.config.clipboardClearEnabled
+    ? `，${S.config.clipboardClearSeconds} 秒后自动清空`
+    : "";
+  toast(manual ? `已复制生成的密码${tail}` : `已自动复制生成的密码${tail}`);
+}
+
+function resetGenerator() {
+  clearTimeout(S.genTimer);
+  S.genTimer = null;
+  S.genInputs = {};
+  S.genResult = "";
+  S.genCopied = "";
+  // 只清状态不清页面的话，明文还留在隐藏视图的节点里；离开视图就该看不见了
+  showGeneratorProblem("");
+  showGeneratorHint("");
+  renderGeneratorResult();
+}
+
+$("#btnGenerator").addEventListener("click", () =>
+  guard(async () => {
+    await showView("generator");
+  })
+);
+
+$("#btnBackFromGenerator").addEventListener("click", () =>
+  guard(async () => {
+    await showView("list");
+  })
+);
+
+$("#selGenerator").addEventListener("change", event => {
+  const def = S.generators.find(item => item.id === event.target.value);
+  if (!def) return;
+  S.gen = def;
+  // 换生成器等于换一套输入：旧结果留着会被误复制
+  resetGenerator();
+  showGeneratorProblem("");
+  renderGeneratorFields();
+  renderGeneratorResult();
+  syncGeneratorSize();
+});
+
+$("#genFields").addEventListener("input", event => {
+  const input = event.target.closest("[data-field]");
+  if (!input || !S.gen) return;
+
+  const field = S.gen.fields.find(item => item.key === input.dataset.field);
+  if (!field) return;
+
+  const value = clampFieldValue(input.value, field.maxLength);
+  if (value !== input.value) input.value = value;
+  S.genInputs[field.key] = value;
+  runGeneratorNow(true);
+});
+
+$("#btnGenCopy").addEventListener("click", () => guard(() => copyGeneratorResult(true)));
+
+$("#btnCopyGenDir").addEventListener("click", () =>
+  guard(async () => {
+    await api.copyText(S.genDir || "");
+    toast("插件目录已复制");
+  })
+);
+
+/* ============================================================
    启动
    ============================================================ */
 async function afterUnlocked() {
@@ -1244,7 +1563,9 @@ async function boot() {
   }
 
   const start = params.get("view");
-  await showView(start === "list" || start === "settings" ? start : "query");
+  // 预览里也允许直接停在生成视图（styles.css 已有对应的 462×380 演示框）
+  const views = ["list", "settings", "generator"];
+  await showView(views.includes(start) ? start : "query");
 
   // 便于截图/演示直接停在某个状态上
   const pick = params.get("pick");

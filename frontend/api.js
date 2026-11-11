@@ -32,7 +32,9 @@
 
   const lock = () => call("lock");
 
-  const setView = view => call("set_view", { view });
+  // height：生成视图按内容量出来的高度；其它视图传 null，用 config 里记住的尺寸
+  const setView = (view, height) =>
+    call("set_view", { view, height: height == null ? null : height });
 
   // mode: "system" | "light" | "dark"；让原生标题栏一起变
   const setWindowTheme = mode => call("apply_theme", { mode });
@@ -88,6 +90,15 @@
 
   const changeMaster = newPassword => call("change_master", { newPassword });
 
+  /* ---------- 生成器插件 ---------- */
+
+  // { dir, present, files: [{ file, source }], warnings: [] }
+  // 后端只把插件源码读成文本，执行发生在前端。
+  const listGenerators = () => call("list_generators");
+
+  // 复制生成的密码。与 copySecret 共用后端那套自动清空逻辑。
+  const copyGenerated = text => call("copy_generated", { text });
+
   root.PassletApi = {
     error,
     bootstrap,
@@ -110,6 +121,8 @@
     exportVault,
     pickImportFile,
     importFrom,
-    changeMaster
+    changeMaster,
+    listGenerators,
+    copyGenerated
   };
 })(typeof globalThis !== "undefined" ? globalThis : window);
