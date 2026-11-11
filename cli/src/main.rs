@@ -185,8 +185,10 @@ fn run(cli: &Cli) -> AppResult<()> {
             Ok(())
         }
         Command::Export { path } => {
-            let (key, salt, vault) = open(&dir)?;
-            let bytes = store::seal(&key, &salt, &vault)?;
+            // 备份密码与主密码分开：这个值只保护导出的文件，从标准输入读
+            let backup_password = read_secret("备份密码")?;
+            let (_, _, vault) = open(&dir)?;
+            let bytes = store::seal_with_password(&backup_password, &vault)?;
             std::fs::write(path, bytes)
                 .map_err(|err| AppError::new("io", format!("写入失败：{err}")))?;
             if cli.json {
@@ -198,9 +200,11 @@ fn run(cli: &Cli) -> AppResult<()> {
         }
         Command::Import { path, mode } => {
             let mode = parse_mode(mode)?;
+            let backup_password = read_secret("备份密码")?;
             let bytes = std::fs::read(path)
                 .map_err(|err| AppError::new("io", format!("读不到这个文件：{err}")))?;
-            let incoming = store::unseal(&bytes, &master::read()?)?;
+            // 备份只认导出时设的那个密码，与主密码无关
+            let incoming = store::unseal_backup(&bytes, &backup_password)?;
 
             let (key, salt, mut vault) = open(&dir)?;
             if mode == MergeMode::Replace {

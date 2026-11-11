@@ -18,3 +18,5 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 [target.'cfg(windows)'.dependencies]
 # 读用户/机器级环境变量：setx 只写注册表，运行中的进程环境块不会更新
 winreg = "0.52"
+# 写完环境变量要广播 WM_SETTINGCHANGE，否则 Explorer 仍用旧的环境块，新开的终端读不到
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

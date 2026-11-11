@@ -4,7 +4,7 @@
 (function (root) {
   "use strict";
 
-  const { validateEntry, normalizeKey, clampInt } = root.PassletLogic;
+  const { validateEntry, validateMasterInput, validateBackupPassword, normalizeKey, clampInt } = root.PassletLogic;
 
   const fail = (code, message) => Promise.reject({ code, message });
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -30,6 +30,15 @@
     { id: "e7", platform: "某银行", username: "6222 **** 8888", password: "Bank!2026ok" }
   ];
   let config = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+
+  // 预览里的主密码状态：一开始当作“没设置”，点一次保存就能看到界面变化
+  let masterState = {
+    active: "none",
+    processEnv: false,
+    userRegistry: false,
+    machineRegistry: false,
+    vaultExists: true
+  };
 
   const find = id => entries.find(item => item.id === id) || null;
 
@@ -57,11 +66,14 @@
 
   const meta = entry => ({ id: entry.id, platform: entry.platform, username: entry.username });
 
+  // 预览里“保存过一次主密码”之后，?demo=error 的强制错误页就不该再挡路了
+  let masterSaved = false;
+
   const handlers = {
     async bootstrap() {
       await sleep(60);
       const forced = new URLSearchParams(location.search).get("demo");
-      if (forced === "error") return { masterLoaded: false, reason: "env_missing" };
+      if (forced === "error" && !masterSaved) return { masterLoaded: false, reason: "env_missing" };
       if (forced === "decrypt") return { masterLoaded: false, reason: "decrypt_failed" };
       if (forced === "corrupt") return { masterLoaded: false, reason: "corrupt" };
       if (forced === "empty") entries = [];
@@ -157,8 +169,40 @@
       return "C:\\Users\\autod\\AppData\\Roaming\\Passlet\\vault.dat";
     },
 
-    async export_vault() {
+    async master_status() {
+      return Object.assign({}, masterState);
+    },
+
+    async set_master_env({ password }) {
+      await sleep(80);
+      const problem = validateMasterInput(password, undefined);
+      if (problem) throw { code: "invalid", message: problem };
+      masterState = {
+        active: "process",
+        processEnv: true,
+        userRegistry: true,
+        machineRegistry: false,
+        vaultExists: masterState.vaultExists
+      };
+      masterSaved = true;
+      return Object.assign({}, masterState);
+    },
+
+    async clear_master_env() {
+      masterState = {
+        active: "none",
+        processEnv: false,
+        userRegistry: false,
+        machineRegistry: false,
+        vaultExists: masterState.vaultExists
+      };
+      return Object.assign({}, masterState);
+    },
+
+    async export_vault({ password }) {
       await sleep(120);
+      const problem = validateBackupPassword(password);
+      if (problem) throw { code: "invalid", message: problem };
       return "C:\\Users\\autod\\Documents\\passlet-backup-20261110-214500.pvault";
     },
 
@@ -167,9 +211,14 @@
       return "C:\\Users\\autod\\Documents\\passlet-backup.pvault";
     },
 
-    async import_from({ path, mode }) {
+    async import_from({ path, mode, password }) {
       await sleep(150);
       if (!path) throw { code: "invalid", message: "读不到这个文件。" };
+      if (!String(password || "").trim()) throw { code: "invalid", message: "备份密码不能为空。" };
+      // 预览里没有真加密：只要密码不是明显的错，就当作能解开
+      if (password === "wrong-backup-pw") {
+        throw { code: "decrypt_failed", message: "这个密码解不开这份备份；文件也可能已损坏。" };
+      }
       const incoming = [
         { id: `i${nextId++}`, platform: "GitHub", username: "me@example.com", password: "imported-gh" },
         { id: `i${nextId++}`, platform: "Docker Hub", username: "autod", password: "docker!2026" },
@@ -213,7 +262,13 @@
     async change_master({ newPassword }) {
       await sleep(120);
       if ([...String(newPassword)].length < 8) throw { code: "invalid", message: "新主密码至少 8 位。" };
-      return null;
+      // 与真实后端一样：换完顺手把环境变量同步掉
+      masterState = Object.assign({}, masterState, {
+        active: "process",
+        processEnv: true,
+        userRegistry: true
+      });
+      return { synced: true, message: null };
     }
   };
 

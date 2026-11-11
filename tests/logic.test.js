@@ -11,7 +11,10 @@ const {
   filterEntries,
   clampInt,
   maskText,
-  validateEntry
+  validateEntry,
+  validateMasterInput,
+  validateBackupPassword,
+  masterStateLines
 } = globalThis.PassletLogic;
 
 describe("normalizeKey：判重用的归一化", () => {
@@ -149,5 +152,110 @@ describe("maskText：掩码固定长度", () => {
   it("固定 8 个圆点，不随密码长度变化", () => {
     expect(maskText()).toHaveLength(8);
     expect(maskText()).toBe("\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022");
+  });
+});
+
+describe("masterStateLines：设置页主密码状态行", () => {
+  const line = info => masterStateLines(info);
+
+  it("还没取到状态时显示读取中", () => {
+    expect(line(null)).toEqual({ main: "正在读取…", note: "" });
+  });
+
+  it("没有值时说明会停在说明页", () => {
+    expect(line({ active: "none" }).main).toBe("未设置");
+    expect(line({ active: "none" }).note).toContain("说明页");
+  });
+
+  it("用户级环境变量", () => {
+    const out = line({ active: "user", userRegistry: true });
+    expect(out.main).toBe("已设置（用户级环境变量）");
+  });
+
+  it("机器级来源说明本程序不改它", () => {
+    const out = line({ active: "machine", machineRegistry: true });
+    expect(out.main).toBe("已设置（机器级）");
+    expect(out.note).toContain("只读不改");
+  });
+
+  it("进程环境变量 + 用户级同时存在时说明两处都有", () => {
+    const out = line({ active: "process", processEnv: true, userRegistry: true });
+    expect(out.main).toBe("已设置（本次运行 + 用户级）");
+    // 这个值可能是程序自己刚写进去的，不能一律说成“启动时传入”
+    expect(out.note).not.toContain("启动时传入");
+  });
+
+  it("只有进程环境变量时不说“重启后失效”", () => {
+    // 用启动脚本的人每次双击都会重新传值，写“失效”会把正确用法说成错的
+    const out = line({ active: "process", processEnv: true, userRegistry: false });
+    expect(out.main).toBe("仅本次运行");
+    expect(out.note).not.toContain("失效");
+    expect(out.note).toContain("启动脚本");
+  });
+
+  it("未知来源退化为未设置（不抛错）", () => {
+    expect(line({ active: "???" }).main).toBe("未设置");
+  });
+});
+
+describe("validateBackupPassword：导出备份时设的密码", () => {
+  it("正常密码通过", () => {
+    expect(validateBackupPassword("backup-pw-2026")).toBeNull();
+  });
+
+  it("空值与全空白被拒绝", () => {
+    expect(validateBackupPassword("")).toBe("备份密码不能为空。");
+    expect(validateBackupPassword("   ")).toBe("备份密码不能为空。");
+    expect(validateBackupPassword(null)).toBe("备份密码不能为空。");
+  });
+
+  it("不足 8 位被拒绝，正好 8 位放行", () => {
+    expect(validateBackupPassword("1234567")).toBe("备份密码至少 8 位。");
+    expect(validateBackupPassword("12345678")).toBeNull();
+  });
+
+  it("两次输入不一致才报错", () => {
+    expect(validateBackupPassword("backup-pw-2026", "backup-pw-2026")).toBeNull();
+    expect(validateBackupPassword("backup-pw-2026", "backup-pw-2027")).toBe("两次输入的密码不一样。");
+  });
+
+  it("不传第二次输入时跳过一致性检查", () => {
+    expect(validateBackupPassword("backup-pw-2026", undefined)).toBeNull();
+  });
+
+  it("首尾空格属于密码本身，不当作空白拒绝", () => {
+    expect(validateBackupPassword("  backup pw  ")).toBeNull();
+  });
+});
+
+describe("validateMasterInput：设置主密码弹窗的输入校验", () => {
+  it("正常密码通过", () => {
+    expect(validateMasterInput("correct horse")).toBeNull();
+  });
+
+  it("空值与全空白都被拒绝", () => {
+    expect(validateMasterInput("")).toBe("主密码不能为空。");
+    expect(validateMasterInput("   ")).toBe("主密码不能为空。");
+    expect(validateMasterInput(null)).toBe("主密码不能为空。");
+    expect(validateMasterInput(undefined)).toBe("主密码不能为空。");
+  });
+
+  it("不做长度限制：短密码也能写进去", () => {
+    // 这里填的可能是很早以前设的主密码，卡 8 位等于逼用户先换密码
+    expect(validateMasterInput("abc")).toBeNull();
+  });
+
+  it("首尾空格是密码的一部分，原样通过", () => {
+    expect(validateMasterInput("  pw  ")).toBeNull();
+  });
+
+  it("要两次输入时，不一致才报错", () => {
+    expect(validateMasterInput("pw1", "pw1")).toBeNull();
+    expect(validateMasterInput("pw1", "pw2")).toBe("两次输入的密码不一样。");
+    expect(validateMasterInput("pw1", "")).toBe("两次输入的密码不一样。");
+  });
+
+  it("不传第二次输入时跳过一致性检查", () => {
+    expect(validateMasterInput("pw1", undefined)).toBeNull();
   });
 });

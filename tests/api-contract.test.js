@@ -118,12 +118,12 @@ describe("配置与备份命令", () => {
     expect(lastCall()).toEqual({ command: "pick_import_file", args: {} });
   });
 
-  it("importFrom 传 path 与 mode", async () => {
+  it("importFrom 传 path、mode 与备份密码", async () => {
     nextResult = { added: 1, skipped: 0, replaced: 0, mode: "skip", backupPath: null };
-    await api.importFrom("C:\\b.pvault", "skip");
+    await api.importFrom("C:\\b.pvault", "skip", "backup-pw-2026");
     expect(lastCall()).toEqual({
       command: "import_from",
-      args: { path: "C:\\b.pvault", mode: "skip" }
+      args: { path: "C:\\b.pvault", mode: "skip", password: "backup-pw-2026" }
     });
   });
 
@@ -133,15 +133,44 @@ describe("配置与备份命令", () => {
   });
 });
 
+describe("主密码环境变量命令", () => {
+  it("masterStatus 不带参数", async () => {
+    nextResult = { active: "user", processEnv: false, userRegistry: true, machineRegistry: false, vaultExists: true };
+    await api.masterStatus();
+    expect(lastCall()).toEqual({ command: "master_status", args: {} });
+  });
+
+  it("setMasterEnv 的参数名是 password", async () => {
+    nextResult = { active: "process" };
+    await api.setMasterEnv("my master");
+    expect(lastCall()).toEqual({ command: "set_master_env", args: { password: "my master" } });
+  });
+
+  it("clearMasterEnv 不带参数", async () => {
+    nextResult = { active: "none" };
+    await api.clearMasterEnv();
+    expect(lastCall()).toEqual({ command: "clear_master_env", args: {} });
+  });
+
+  it("后端拒写时把错误码透出来", async () => {
+    nextError = { code: "wrong_master", message: "这个密码打不开现有的密码库，请确认后再试。" };
+    await expect(api.setMasterEnv("typo")).rejects.toMatchObject({ code: "wrong_master" });
+  });
+});
+
 describe("返回值形状", () => {
-  it("exportVault 把路径字符串包成 { path }", async () => {
+  it("exportVault 把备份密码传给后端，并把路径包成 { path }", async () => {
     nextResult = "C:\\backup.pvault";
-    await expect(api.exportVault()).resolves.toEqual({ path: "C:\\backup.pvault" });
+    await expect(api.exportVault("backup-pw-2026")).resolves.toEqual({ path: "C:\\backup.pvault" });
+    expect(lastCall()).toEqual({
+      command: "export_vault",
+      args: { password: "backup-pw-2026" }
+    });
   });
 
   it("用户取消导出时返回 null", async () => {
     nextResult = null;
-    await expect(api.exportVault()).resolves.toBeNull();
+    await expect(api.exportVault("backup-pw-2026")).resolves.toBeNull();
   });
 
   it("后端错误对象原样抛给调用方", async () => {

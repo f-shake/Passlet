@@ -53,6 +53,21 @@ pub fn unseal(bytes: &[u8], master: &str) -> AppResult<Vault> {
     Ok(vault)
 }
 
+/// 解不开备份时给用户看的那句话。GUI 与 CLI 共用，免得两处文案各走各的。
+pub const BACKUP_DECRYPT_MESSAGE: &str = "这个密码解不开这份备份；文件也可能已损坏。";
+
+/// 解开备份文件，并把“密码不对”统一成 [`BACKUP_DECRYPT_MESSAGE`]。
+/// 只改这一个错误码：corrupt / version 是文件本身的问题，原样往上抛才对。
+pub fn unseal_backup(bytes: &[u8], password: &str) -> AppResult<Vault> {
+    unseal(bytes, password).map_err(|err| {
+        if err.code == "decrypt_failed" {
+            AppError::new("decrypt_failed", BACKUP_DECRYPT_MESSAGE)
+        } else {
+            err
+        }
+    })
+}
+
 /// 换主密码：生成新盐、新密钥，返回可直接写盘的新材料。
 pub fn rotate(master: &str, vault: &Vault) -> AppResult<(Key, [u8; SALT_LEN], Vec<u8>)> {
     if master.chars().count() < 8 {
@@ -62,6 +77,27 @@ pub fn rotate(master: &str, vault: &Vault) -> AppResult<(Key, [u8; SALT_LEN], Ve
     let key = crypto::derive_key(master, &salt)?;
     let bytes = seal(&key, &salt, vault)?;
     Ok((key, salt, bytes))
+}
+
+/// 备份密码的规则。它与主密码分开，但同样是这份文件唯一的凭据，所以不许太短。
+pub fn validate_backup_password(password: &str) -> AppResult<()> {
+    if password.trim().is_empty() {
+        return Err(AppError::new("invalid", "备份密码不能为空。"));
+    }
+    if password.chars().count() < 8 {
+        return Err(AppError::new("invalid", "备份密码至少 8 位。"));
+    }
+    Ok(())
+}
+
+/// 用调用方给的密码封包（导出备份用），每次新盐。
+/// 与 [`seal`] 的差别只在密钥从哪来：这里由备份密码派生，因此备份与主密码解耦，
+/// 换主密码不会让已导出的备份作废，把备份交给别人也不必交出主密码。
+pub fn seal_with_password(password: &str, vault: &Vault) -> AppResult<Vec<u8>> {
+    validate_backup_password(password)?;
+    let salt = crypto::new_salt();
+    let key = crypto::derive_key(password, &salt)?;
+    seal(&key, &salt, vault)
 }
 
 
@@ -134,5 +170,54 @@ mod tests {
     fn 新主密码不足八位被拒绝() {
         let vault = Vault::new();
         assert_eq!(rotate("short", &vault).unwrap_err().code, "invalid");
+    }
+
+    #[test]
+    fn 用备份密码封包的字节能被同一密码解开() {
+        let vault = vault_with(&[("GitHub", "me", "p1"), ("NAS", "admin", "p2")]);
+        let bytes = seal_with_password("backup-pw-2026", &vault).unwrap();
+
+        let reopened = unseal(&bytes, "backup-pw-2026").unwrap();
+        assert_eq!(reopened.entries.len(), 2);
+        // 与主密码无关：主密码解不开这份备份
+        assert_eq!(unseal(&bytes, MASTER).unwrap_err().code, "decrypt_failed");
+    }
+
+    #[test]
+    fn 备份密码太短或全空白被拒绝() {
+        let vault = Vault::new();
+        for bad in ["", "   ", "short", "1234567"] {
+            assert_eq!(
+                seal_with_password(bad, &vault).unwrap_err().code,
+                "invalid",
+                "应当拒绝：{bad:?}"
+            );
+        }
+        // 边界：正好 8 位放行
+        assert!(seal_with_password("12345678", &vault).is_ok());
+    }
+
+    #[test]
+    fn 同一份库两次导出得到不同的盐() {
+        let vault = vault_with(&[("GitHub", "me", "p")]);
+        let first = seal_with_password("backup-pw-2026", &vault).unwrap();
+        let second = seal_with_password("backup-pw-2026", &vault).unwrap();
+        // 盐复用会让两份密文相同，也让“同一个密码”更容易被批量比对
+        assert_ne!(
+            crypto::decode(&first).unwrap().salt,
+            crypto::decode(&second).unwrap().salt
+        );
+    }
+
+    #[test]
+    fn 换主密码后已导出的备份照样能用原备份密码打开() {
+        let vault = vault_with(&[("GitHub", "me", "p")]);
+        let backup = seal_with_password("backup-pw-2026", &vault).unwrap();
+
+        // 换主密码只影响库文件，备份里的盐与密钥跟主密码没有关系
+        let (_, _, rotated) = rotate("a brand new master password", &vault).unwrap();
+        assert!(unseal(&backup, "backup-pw-2026").is_ok());
+        // 反过来：主密码换了之后，旧主密码也打不开新库
+        assert_eq!(unseal(&rotated, MASTER).unwrap_err().code, "decrypt_failed");
     }
 }

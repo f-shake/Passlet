@@ -11,7 +11,10 @@ const {
   clampInt,
   maskText,
   normalizeKey,
-  validateEntry
+  validateEntry,
+  validateMasterInput,
+  validateBackupPassword,
+  masterStateLines
 } = globalThis.PassletLogic;
 
 /* ============================================================
@@ -50,6 +53,9 @@ const S = {
   rowTimers: new Map(),
   pwdTimer: null,
   vaultPathText: "",
+  master: null,
+  // 换主密码后环境变量没写成功时置位：这一行要一直提醒到下次写入成功
+  masterSyncFailed: false,
 };
 
 /* ============================================================
@@ -201,6 +207,10 @@ function showError(status) {
   cmd.textContent = info.cmd;
 
   $("#errCopy").hidden = !info.cmd;
+  // 没读到主密码、或环境变量里的密码解不开库，都能当场改掉；
+  // 文件损坏 / 版本太新这两类改环境变量没用，别给错误的出路
+  const canFix = status && (status.reason === "env_missing" || status.reason === "decrypt_failed");
+  $("#errSetMaster").hidden = !canFix;
   $("#app").dataset.view = "error";
   S.view = "error";
   updateSizeTag();
@@ -223,6 +233,8 @@ $("#errRetry").addEventListener("click", () =>
     await afterUnlocked();
   })
 );
+
+$("#errSetMaster").addEventListener("click", () => guard(() => openMasterModal()));
 
 /* ============================================================
    查询视图：两个联动下拉
@@ -797,6 +809,7 @@ function renderSettings() {
   $("#numClipboardSeconds").disabled = !S.config.clipboardClearEnabled;
   $("#numHideSeconds").value = S.config.hidePasswordSeconds;
   updateSizeTag();
+  refreshMasterState();
 
   // 数据文件路径只在第一次进设置页时取，之后复用
   if (!S.vaultPathText) {
@@ -851,10 +864,13 @@ $("#btnCopyPath").addEventListener("click", () =>
 
 $("#btnExport").addEventListener("click", event =>
   guard(async () => {
+    // 必须在第一个 await 之前取：事件派发结束后 currentTarget 会被置空
     const button = event.currentTarget;
+    const password = await askExportPassword();
+    if (!password) return;
     button.disabled = true;
     try {
-      const result = await api.exportVault();
+      const result = await api.exportVault(password);
       if (result && result.path) toast(`已导出到 ${result.path}`);
     } finally {
       button.disabled = false;
@@ -866,20 +882,70 @@ $("#btnImport").addEventListener("click", () =>
   guard(async () => {
     const path = await api.pickImportFile();
     if (!path) return;
-    const mode = await askImportMode();
-    if (!mode) return;
-    const report = await api.importFrom(path, mode);
+    const report = await runImport(path);
+    if (!report) return;
     await refreshEntries();
     showImportReport(report);
   })
 );
 
-function askImportMode() {
+/** 导出前先要一个只属于这份备份的密码：它不参与打开库，换主密码也不会让它失效。 */
+function askExportPassword() {
   return new Promise(resolve => {
     const modal = openModal({
-      title: "导入方式",
-      onClose: () => resolve(null),
+      title: "导出加密备份",
       body: `
+        <p>给这份备份设一个独立密码，可以和主密码不同。</p>
+        <p>它只用来保护导出的文件：以后换主密码不影响它，把备份交给别人也不必交出主密码。</p>
+        <div class="form-field">
+          <label for="bPass">备份密码</label>
+          <div class="wrap"><input class="input" id="bPass" type="password" autocomplete="off" spellcheck="false"></div>
+        </div>
+        <div class="form-field">
+          <label for="bPass2">再输一次</label>
+          <div class="wrap"><input class="input" id="bPass2" type="password" autocomplete="off" spellcheck="false"></div>
+        </div>`,
+      buttons: [
+        { label: "取消", onClick: close => { resolve(null); close(); } },
+        {
+          label: "继续",
+          primary: true,
+          onClick: (close, button) => {
+            const value = modal.body.querySelector("#bPass").value;
+            const again = modal.body.querySelector("#bPass2").value;
+            const problem = validateBackupPassword(value, again);
+            if (problem) {
+              toast(problem);
+              return;
+            }
+            // 先定型再关闭：close() 会触发 onClose 的 resolve(null)
+            resolve(value);
+            close();
+            button.blur();
+          }
+        }
+      ],
+      onClose: () => resolve(null)
+    });
+    setTimeout(() => modal.body.querySelector("#bPass").focus(), 0);
+  });
+}
+
+/**
+ * 导入弹窗：备份密码与合并方式放在一起，确定之前不需要后端往返。
+ * 密码错了就在弹窗里报错并保持打开，用户改一下再试即可。
+ */
+function runImport(path) {
+  return new Promise(resolve => {
+    const modal = openModal({
+      title: "导入备份",
+      body: `
+        <p>这份备份由导出时设的密码保护，输入那个密码即可。</p>
+        <div class="form-field">
+          <label for="iPass">备份密码</label>
+          <div class="wrap"><input class="input" id="iPass" type="password" autocomplete="off" spellcheck="false"></div>
+          <p class="ferr" id="iErr" hidden></p>
+        </div>
         <p>选择这份备份与现有数据如何合并。</p>
         <label class="choice">
           <input type="radio" name="importMode" value="replace">
@@ -894,21 +960,47 @@ function askImportMode() {
           <span><span class="t">合并 · 覆盖重复</span><span class="d">同平台且同用户名的用备份里的密码覆盖，其余追加。</span></span>
         </label>`,
       buttons: [
-        { label: "取消", onClick: close => { close(); resolve(null); } },
+        { label: "取消", onClick: close => { resolve(null); close(); } },
         {
-          label: "继续",
+          label: "导入",
           primary: true,
           onClick: (close, button) => {
+            const password = modal.body.querySelector("#iPass").value;
+            if (!password.trim()) {
+              showFormError(modal, "iErr", "备份密码不能为空。");
+              return;
+            }
             const picked = modal.body.querySelector('input[name="importMode"]:checked');
-            // 先定型再关闭：close() 会触发 onClose 的 resolve(null)，顺序反了导入永远拿不到 mode
-            resolve(picked ? picked.value : null);
-            close();
-            button.blur();
+            const mode = picked ? picked.value : "skip";
+            button.disabled = true;
+            api
+              .importFrom(path, mode, password)
+              .then(report => {
+                // 先定型再关闭：close() 会触发 onClose 的 resolve(null)
+                resolve(report);
+                close();
+              })
+              .catch(err => {
+                showFormError(modal, "iErr", err && err.message ? err.message : String(err));
+              })
+              .finally(() => {
+                button.disabled = false;
+              });
           }
         }
-      ]
+      ],
+      onClose: () => resolve(null)
     });
+    setTimeout(() => modal.body.querySelector("#iPass").focus(), 0);
   });
+}
+
+/** 弹窗内的错误行：传空字符串就把它藏起来。 */
+function showFormError(modal, id, text) {
+  const el = modal.body.querySelector(`#${id}`);
+  if (!el) return;
+  el.textContent = text;
+  el.hidden = !text;
 }
 
 function showImportReport(report) {
@@ -923,16 +1015,146 @@ function showImportReport(report) {
   openModal({
     title: "导入完成",
     body: `<p>方式：${esc(modeLabel)}；${esc(lines.join("，"))}。</p>${backup}`,
-    buttons: [{ label: "好", primary: true, onClick: close => close() }]
+    buttons: [{ label: "确定", primary: true, onClick: close => close() }]
   });
 }
+
+/* ---------- 主密码与环境变量 ---------- */
+
+function renderMasterState() {
+  const lines = S.masterSyncFailed
+    ? { main: "环境变量与库不一致", note: "库密码已更换但环境变量没写成功，请点“设置/更新”重写一次。" }
+    : masterStateLines(S.master);
+  $("#masterStateMain").textContent = lines.main;
+  $("#masterStateNote").textContent = lines.note;
+  // 机器级的值本程序改不了、没有值时也没东西可清，这两种情况按钮只会骗人
+  const active = S.master && S.master.active;
+  $("#btnClearMaster").disabled = !active || active === "none" || active === "machine";
+}
+
+async function refreshMasterState() {
+  const info = await guard(() => api.masterStatus());
+  if (!info) return;
+  S.master = info;
+  renderMasterState();
+}
+
+/** 写入成功后的去向：从错误页进来的，直接把用户带进主界面。 */
+async function continueAfterMasterSaved() {
+  if (S.view !== "error") return;
+  const status = await guard(() => api.bootstrap());
+  if (!status) return;
+  if (!status.masterLoaded) {
+    showError(status);
+    return;
+  }
+  await afterUnlocked();
+}
+
+async function openMasterModal() {
+  const info = S.master || (await api.masterStatus());
+  S.master = info;
+  // 库还不存在时后端没法验证密码对不对，只能靠输两次防笔误
+  const needsConfirm = !info.vaultExists;
+  const confirmField = needsConfirm
+    ? `<div class="form-field">
+         <label for="mPass2">再输一次</label>
+         <div class="wrap"><input class="input" id="mPass2" type="password" autocomplete="off" spellcheck="false"></div>
+       </div>`
+    : "";
+
+  const modal = openModal({
+    title: "设置主密码",
+    body: `
+      <p>保存后写进你的用户级环境变量，下次启动不必再输入。</p>
+      <p>它以明文存在注册表里，任何以你身份运行的程序都能读到。</p>
+      <div class="form-field">
+        <label for="mPass">主密码</label>
+        <div class="wrap"><input class="input" id="mPass" type="password" autocomplete="off" spellcheck="false"></div>
+        <p class="ferr" id="mErr" hidden></p>
+      </div>
+      ${confirmField}`,
+    buttons: [
+      { label: "取消", onClick: close => close() },
+      {
+        label: "保存",
+        primary: true,
+        onClick: (close, button) => {
+          (async () => {
+            const value = modal.body.querySelector("#mPass").value;
+            const again = needsConfirm ? modal.body.querySelector("#mPass2").value : undefined;
+            const problem = validateMasterInput(value, again);
+            if (problem) {
+              showFormError(modal, "mErr", problem);
+              return;
+            }
+            showFormError(modal, "mErr", "");
+            button.disabled = true;
+            try {
+              S.master = await api.setMasterEnv(value);
+            } catch (err) {
+              // 只有这一步的错误属于“密码不对”，原因要留在弹窗里，别用两秒就消失的提示条
+              showFormError(modal, "mErr", err && err.message ? err.message : String(err));
+              button.disabled = false;
+              return;
+            }
+            button.disabled = false;
+            S.masterSyncFailed = false;
+            renderMasterState();
+            close();
+            toast("已写入环境变量，本次运行立即生效。");
+            // 弹窗已经关了，之后的失败只能走提示条；放进 try 里会被写进看不见的错误行
+            await guard(() => continueAfterMasterSaved());
+          })();
+        }
+      }
+    ]
+  });
+  setTimeout(() => modal.body.querySelector("#mPass").focus(), 0);
+}
+
+function confirmClearMaster() {
+  return new Promise(resolve => {
+    openModal({
+      title: "清除主密码",
+      body: "<p>清除后下次启动会停在说明页，要求重新设置主密码。这次运行不受影响。</p>",
+      buttons: [
+        { label: "取消", onClick: close => { resolve(false); close(); } },
+        {
+          label: "清除",
+          danger: true,
+          onClick: close => {
+            // 先定型再关闭：close() 会触发 onClose 的 resolve(false)
+            resolve(true);
+            close();
+          }
+        }
+      ],
+      onClose: () => resolve(false)
+    });
+  });
+}
+
+$("#btnSetMaster").addEventListener("click", () => guard(() => openMasterModal()));
+
+$("#btnClearMaster").addEventListener("click", () =>
+  guard(async () => {
+    if (!(await confirmClearMaster())) return;
+    const info = await api.clearMasterEnv();
+    S.master = info;
+    S.masterSyncFailed = false;
+    renderMasterState();
+    // 机器级的值删不掉，返回的 active 会照实说明它还在生效
+    toast(info.active === "none" ? "环境变量已清除。" : "用户级的值已清除，机器级的值仍在生效。");
+  })
+);
 
 $("#btnChangeMaster").addEventListener("click", () =>
   guard(async () => {
     const modal = openModal({
       title: "更换主密码",
       body: `
-        <p>更换后需要用新的主密码同步修改环境变量 PASSLET_MASTER，否则下次启动会打不开。</p>
+        <p>更换后会自动把新主密码写进环境变量，不需要你再手动改。</p>
         <div class="form-field">
           <label for="mNew">新主密码</label>
           <div class="wrap"><input class="input" id="mNew" type="password" autocomplete="off" spellcheck="false"></div>
@@ -960,9 +1182,15 @@ $("#btnChangeMaster").addEventListener("click", () =>
               }
               button.disabled = true;
               try {
-                await api.changeMaster(next);
+                const result = await api.changeMaster(next);
                 close();
-                toast("主密码已更换。记得同步修改环境变量 PASSLET_MASTER。");
+                S.masterSyncFailed = Boolean(result && result.synced === false);
+                S.master = await api.masterStatus();
+                renderMasterState();
+                // 库密码这时已经换了，同步失败必须说清楚，否则用户以为一切正常
+                toast(result && result.synced === false
+                  ? `主密码已更换，但环境变量没写成功，请点“设置/更新”重试。（${result.message || "未知原因"}）`
+                  : "主密码已更换，环境变量已同步。");
               } finally {
                 button.disabled = false;
               }
@@ -1027,7 +1255,9 @@ async function boot() {
 
   const modal = params.get("modal");
   if (modal === "new") await openEntryModal(null);
-  if (modal === "import") askImportMode();
+  // 截图钩子：导入弹窗现在要一个已选的文件路径，预览里给个假的即可
+  if (modal === "import") runImport("C:\\Users\\autod\\Documents\\passlet-backup.pvault");
+  if (modal === "export") askExportPassword();
   if (modal === "master") $("#btnChangeMaster").click();
   if (modal === "report") {
     showImportReport({ added: 3, skipped: 1, replaced: 0, mode: "skip", backupPath: null });

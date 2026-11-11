@@ -64,18 +64,27 @@
 
   const vaultPath = () => call("vault_path_display");
 
+  // 返回 { active, processEnv, userRegistry, machineRegistry, vaultExists }
+  const masterStatus = () => call("master_status");
+
+  // 写进用户级环境变量。后端会先验证这个密码能解开现有库，解不开就拒绝写入。
+  const setMasterEnv = password => call("set_master_env", { password });
+
+  const clearMasterEnv = () => call("clear_master_env");
+
   /* ---------- 备份 ---------- */
 
   // 返回 { path } 或 null（用户取消）。命令返回的是字符串或 null。
-  const exportVault = async () => {
-    const path = await call("export_vault");
+  // password 是"备份密码"，与主密码无关：它只保护导出的文件。
+  const exportVault = async password => {
+    const path = await call("export_vault", { password });
     return path ? { path } : null;
   };
 
   const pickImportFile = () => call("pick_import_file");
 
-  // mode: "replace" | "skip" | "overwrite"
-  const importFrom = (path, mode) => call("import_from", { path, mode });
+  // mode: "replace" | "skip" | "overwrite"；password 是导出时设的备份密码
+  const importFrom = (path, mode, password) => call("import_from", { path, mode, password });
 
   const changeMaster = newPassword => call("change_master", { newPassword });
 
@@ -95,6 +104,9 @@
     getConfig,
     saveConfig,
     vaultPath,
+    masterStatus,
+    setMasterEnv,
+    clearMasterEnv,
     exportVault,
     pickImportFile,
     importFrom,

@@ -74,6 +74,56 @@
     return null;
   }
 
+  /**
+   * 校验“设置主密码”弹窗的输入，返回错误文案；通过则返回 null。
+   * 只拒绝空白，不限制长度：这里填的往往是已有主密码，长度规则属于“更换主密码”。
+   * `confirm` 传 undefined 表示不做两次一致性检查（库已存在时后端会先验证能不能解开）。
+   */
+  function validateMasterInput(value, confirm) {
+    const text = String(value == null ? "" : value);
+    if (!text.trim()) return "主密码不能为空。";
+    if (confirm !== undefined && text !== String(confirm == null ? "" : confirm)) {
+      return "两次输入的密码不一样。";
+    }
+    return null;
+  }
+
+  /**
+   * 设置页「主密码」那一行显示什么。
+   * 只说“值在哪里”，不说“下次一定打得开”——状态查不到库密码与这些值是否一致，
+   * 承诺得越具体，越容易在换密码同步失败之类的场合变成假话。
+   */
+  function masterStateLines(info) {
+    if (!info) return { main: "正在读取…", note: "" };
+    if (info.active === "process") {
+      return info.userRegistry
+        ? { main: "已设置（本次运行 + 用户级）", note: "本次用的是进程环境里的值，用户级环境变量里也存了一份。" }
+        : { main: "仅本次运行", note: "进程环境里的值；不用启动脚本直接打开时会读不到。" };
+    }
+    if (info.active === "user") {
+      return { main: "已设置（用户级环境变量）", note: "程序下次启动会从这里读取。" };
+    }
+    if (info.active === "machine") {
+      return { main: "已设置（机器级）", note: "来自系统级环境变量，本程序只读不改。" };
+    }
+    return { main: "未设置", note: "直接打开程序会停在说明页。" };
+  }
+
+  /**
+   * 校验“导出备份”弹窗的备份密码，返回错误文案；通过则返回 null。
+   * 它与主密码是两回事：备份密码只保护导出的文件，导出之后换主密码也不影响它。
+   * 导入时只校验非空——长度是不是够，后端解一次就知道，不必在这里先挡一道。
+   */
+  function validateBackupPassword(value, confirm) {
+    const text = String(value == null ? "" : value);
+    if (!text.trim()) return "备份密码不能为空。";
+    if ([...text].length < 8) return "备份密码至少 8 位。";
+    if (confirm !== undefined && text !== String(confirm == null ? "" : confirm)) {
+      return "两次输入的密码不一样。";
+    }
+    return null;
+  }
+
   root.PassletLogic = {
     normalizeKey,
     matchScore,
@@ -81,6 +131,9 @@
     filterEntries,
     clampInt,
     maskText,
-    validateEntry
+    validateEntry,
+    validateMasterInput,
+    validateBackupPassword,
+    masterStateLines
   };
 })(typeof globalThis !== "undefined" ? globalThis : window);

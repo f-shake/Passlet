@@ -8,6 +8,8 @@ use std::process::{Command, Output, Stdio};
 use passlet_core::scratch;
 
 const MASTER: &str = "cli-e2e-master-password";
+/// 备份密码与主密码是两回事，这里刻意取一个明显不同的值
+const BACKUP_PW: &str = "cli-backup-password-2026";
 
 fn run(dir: &Path, args: &[&str], stdin: Option<&str>, master: &str) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_passlet-cli"));
@@ -124,7 +126,7 @@ fn 导出再导入能还原条目() {
     let exported = run(
         &dir,
         &["export", backup.to_str().unwrap()],
-        None,
+        Some(BACKUP_PW),
         MASTER,
     );
     assert!(exported.status.success(), "{}", text(&exported.stderr));
@@ -134,7 +136,7 @@ fn 导出再导入能还原条目() {
     let imported = run(
         &dir,
         &["import", backup.to_str().unwrap(), "--mode", "replace"],
-        None,
+        Some(BACKUP_PW),
         MASTER,
     );
     assert!(imported.status.success(), "{}", text(&imported.stderr));
@@ -147,5 +149,72 @@ fn 导出再导入能还原条目() {
         .filter_map(|item| item.ok())
         .any(|item| item.file_name().to_string_lossy().contains(".bak."));
     assert!(has_backup, "整库替换应留下备份文件");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn 备份密码错时导入失败且库文件一个字节都不动() {
+    let dir = scratch::scratch_dir("cli-import-wrong-pw");
+    run(&dir, &["add", "Gitee", "me"], Some("keep-me"), MASTER);
+    let backup = dir.join("backup.pvault");
+    let exported = run(
+        &dir,
+        &["export", backup.to_str().unwrap()],
+        Some(BACKUP_PW),
+        MASTER,
+    );
+    assert!(exported.status.success(), "{}", text(&exported.stderr));
+
+    let before = std::fs::read(dir.join(passlet_core::VAULT_NAME)).unwrap();
+    let failed = run(
+        &dir,
+        &["import", backup.to_str().unwrap()],
+        Some("definitely-wrong-pw"),
+        MASTER,
+    );
+    // 退出码 2 = 密码问题（与主密码不对同一个桶）
+    assert_eq!(failed.status.code(), Some(2));
+    assert!(
+        text(&failed.stderr).contains("解不开"),
+        "提示应说明是密码问题：{}",
+        text(&failed.stderr)
+    );
+    assert_eq!(
+        std::fs::read(dir.join(passlet_core::VAULT_NAME)).unwrap(),
+        before,
+        "密码错时不该动库文件"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn 换主密码后旧备份照样能用原备份密码导入() {
+    const NEW_MASTER: &str = "cli-new-master-password";
+    let dir = scratch::scratch_dir("cli-backup-independent");
+    run(&dir, &["add", "Gitee", "me"], Some("keep-me"), MASTER);
+    let backup = dir.join("backup.pvault");
+    let exported = run(
+        &dir,
+        &["export", backup.to_str().unwrap()],
+        Some(BACKUP_PW),
+        MASTER,
+    );
+    assert!(exported.status.success(), "{}", text(&exported.stderr));
+
+    let rotated = run(&dir, &["change-master"], Some(NEW_MASTER), MASTER);
+    assert!(rotated.status.success(), "{}", text(&rotated.stderr));
+
+    // 换完密码清空库，再用旧备份 + 备份密码导入：备份与主密码无关，应当成功
+    run(&dir, &["remove", "Gitee", "me", "--yes"], None, NEW_MASTER);
+    let imported = run(
+        &dir,
+        &["import", backup.to_str().unwrap(), "--mode", "replace"],
+        Some(BACKUP_PW),
+        NEW_MASTER,
+    );
+    assert!(imported.status.success(), "{}", text(&imported.stderr));
+
+    let fetched = run(&dir, &["get", "Gitee", "me"], None, NEW_MASTER);
+    assert_eq!(text(&fetched.stdout), "keep-me");
     std::fs::remove_dir_all(&dir).ok();
 }

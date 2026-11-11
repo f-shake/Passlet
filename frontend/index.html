@@ -25,7 +25,8 @@
       <code class="err-cmd" id="errCmd" hidden></code>
       <div class="err-actions">
         <button class="btn btn-sm" id="errCopy" hidden>复制命令</button>
-        <button class="btn btn-sm btn-primary" id="errRetry">重新读取</button>
+        <button class="btn btn-sm btn-primary" id="errSetMaster" hidden>在这里设置主密码</button>
+        <button class="btn btn-sm" id="errRetry">重新读取</button>
       </div>
     </div>
   </section>
@@ -185,10 +186,23 @@
       </div>
 
       <div class="sgroup">
-        <div class="sgroup-title">安全</div>
+        <div class="sgroup-title">主密码</div>
         <div class="srow">
-          <span class="slabel">主密码</span>
-          <button class="btn btn-sm" id="btnChangeMaster">更换主密码</button>
+          <span class="slabel">环境变量</span>
+          <span class="mstate">
+            <b id="masterStateMain">正在读取…</b>
+            <i id="masterStateNote"></i>
+          </span>
+          <span class="sctl gap">
+            <button class="btn btn-sm" id="btnSetMaster">设置/更新</button>
+            <button class="btn btn-sm" id="btnClearMaster">清除</button>
+          </span>
+        </div>
+        <div class="srow">
+          <span class="slabel">更换</span>
+          <span class="sctl gap">
+            <button class="btn btn-sm" id="btnChangeMaster">更换主密码</button>
+          </span>
         </div>
       </div>
     </div>

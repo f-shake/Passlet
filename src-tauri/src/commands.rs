@@ -15,7 +15,7 @@ use passlet_core::master;
 use passlet_core::paths;
 use passlet_core::storage;
 use passlet_core::store;
-use passlet_core::vault::{EntryMeta, MergeMode, Vault};
+use passlet_core::vault::{EntryMeta, MergeMode};
 
 use crate::session::{AppState, Session};
 
@@ -36,6 +36,26 @@ pub struct ImportReport {
     pub replaced: usize,
     pub mode: String,
     pub backup_path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MasterInfo {
+    /// "process" / "user" / "machine" / "none"，与 `master::read()` 的查找顺序一致
+    pub active: &'static str,
+    pub process_env: bool,
+    pub user_registry: bool,
+    pub machine_registry: bool,
+    /// 库文件是否存在：没有库就没法校验密码，界面因此要求输两次
+    pub vault_exists: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeMasterReport {
+    /// 环境变量是否同步成功。库密码这时已经换了，这一步失败必须让用户看见
+    pub synced: bool,
+    pub message: Option<String>,
 }
 
 fn with_session<T>(state: &AppState, f: impl FnOnce(&Session) -> AppResult<T>) -> AppResult<T> {
@@ -62,6 +82,53 @@ fn persist(session: &Session) -> AppResult<()> {
 
 fn persist_to(session: &Session, dir: &Path) -> AppResult<()> {
     store::persist_in(dir, &session.key, &session.salt, &session.vault)
+}
+
+fn master_info() -> MasterInfo {
+    let status = master::status();
+    MasterInfo {
+        active: status.active,
+        process_env: status.process_env,
+        user_registry: status.user_registry,
+        machine_registry: status.machine_registry,
+        vault_exists: paths::vault_file()
+            .map(|path| path.exists())
+            .unwrap_or(false),
+    }
+}
+
+/// 候选主密码能不能解开现有的库。
+///
+/// 库文件不存在时不能一律放行：首次从说明页设置完之后，内存里已经有会话了，
+/// 这时再改成一个别的值，就会出现“环境变量是 B、内存还是 A、重启再也打不开”的死路。
+/// 有会话就拿它比：会话的盐与密钥就是当前主密码的凭据。
+fn verify_master(state: &AppState, dir: &Path, candidate: &str) -> AppResult<()> {
+    if dir.join(storage::VAULT_NAME).exists() {
+        return match store::open_in(dir, candidate) {
+            Ok(_) => Ok(()),
+            // 只有“解密失败”才是密码不对；corrupt / version 是文件本身的问题，原样往上抛
+            Err(err) if err.code == "decrypt_failed" => Err(AppError::new(
+                "wrong_master",
+                "这个密码打不开现有的密码库，请确认后再试。",
+            )),
+            Err(err) => Err(err),
+        };
+    }
+
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| AppError::new("internal", "会话状态异常。"))?;
+    if let Some(session) = guard.as_ref() {
+        let key = crypto::derive_key(candidate, &session.salt)?;
+        if *key != *session.key {
+            return Err(AppError::new(
+                "wrong_master",
+                "这个密码跟当前正在用的主密码不一致。要改主密码请用“更换主密码”，那会连库一起换。",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -274,6 +341,30 @@ pub fn vault_path_display() -> AppResult<String> {
 }
 
 #[tauri::command]
+pub fn master_status() -> MasterInfo {
+    master_info()
+}
+
+/// 把用户输入的主密码写进用户级环境变量。
+/// 写之前先验一次：能解开现有库才允许写，否则一个笔误就让人下次启动打不开。
+#[tauri::command]
+pub async fn set_master_env(
+    state: tauri::State<'_, AppState>,
+    password: String,
+) -> AppResult<MasterInfo> {
+    let dir = paths::data_dir()?;
+    verify_master(state.inner(), &dir, &password)?;
+    master::write_user(&password)?;
+    Ok(master_info())
+}
+
+#[tauri::command]
+pub fn clear_master_env() -> AppResult<MasterInfo> {
+    master::clear_user()?;
+    Ok(master_info())
+}
+
+#[tauri::command]
 pub fn set_view(window: tauri::WebviewWindow, view: String) {
     let config = config::load();
     let size = match view.as_str() {
@@ -281,8 +372,38 @@ pub fn set_view(window: tauri::WebviewWindow, view: String) {
         "settings" => config.window_sizes.settings,
         _ => config.window_sizes.query,
     };
+
+    // 记住当前窗口中心，换尺寸后仍用这个中心。
+    // 之前这里每切一次视图就 center()，三个视图尺寸不同，看起来就是窗口"瞬移"。
+    let previous_center = window.outer_position().ok().and_then(|position| {
+        let outer = window.outer_size().ok()?;
+        Some((
+            position.x as f64 + outer.width as f64 / 2.0,
+            position.y as f64 + outer.height as f64 / 2.0,
+        ))
+    });
+
     let _ = window.set_size(tauri::LogicalSize::new(size[0] as f64, size[1] as f64));
-    let _ = window.center();
+
+    let (Some((center_x, center_y)), Ok(outer)) = (previous_center, window.outer_size()) else {
+        return;
+    };
+
+    let mut x = (center_x - outer.width as f64 / 2.0).round() as i32;
+    let mut y = (center_y - outer.height as f64 / 2.0).round() as i32;
+
+    // 夹到当前显示器工作区，避免大窗口的中心落在屏幕边缘时跑出去
+    if let Ok(Some(monitor)) = window.current_monitor() {
+        let area = monitor.work_area();
+        let min_x = area.position.x;
+        let min_y = area.position.y;
+        let max_x = (area.position.x + area.size.width as i32 - outer.width as i32).max(min_x);
+        let max_y = (area.position.y + area.size.height as i32 - outer.height as i32).max(min_y);
+        x = x.clamp(min_x, max_x);
+        y = y.clamp(min_y, max_y);
+    }
+
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }
 
 /// 复制任意文本（路径、命令）。与 copy_secret 共用剪贴板通道，
@@ -307,14 +428,11 @@ pub fn apply_theme(window: tauri::WebviewWindow, mode: String) {
 }
 
 /// 从内存重新加密导出：保证备份就是当前状态，而不是磁盘上可能过期的一份。
+/// 加密用的是用户现设的备份密码，与主密码无关——备份可以拿给别人，也不必在换主密码后重导。
 #[tauri::command]
-pub async fn export_vault(app: AppHandle) -> Result<Option<String>, AppError> {
-    let bytes = {
-        let state = app.state::<AppState>();
-        with_session(state.inner(), |session| {
-            store::seal(&session.key, &session.salt, &session.vault)
-        })?
-    };
+pub async fn export_vault(app: AppHandle, password: String) -> Result<Option<String>, AppError> {
+    // 先校验再弹保存对话框：让用户选完路径才被告知“密码太短”太蠢
+    store::validate_backup_password(&password)?;
 
     let file_name = format!(
         "passlet-backup-{}.pvault",
@@ -338,8 +456,56 @@ pub async fn export_vault(app: AppHandle) -> Result<Option<String>, AppError> {
     let path = file
         .into_path()
         .map_err(|err| AppError::new("io", format!("无效的保存路径：{err}")))?;
-    std::fs::write(&path, bytes)
-        .map_err(|err| AppError::new("io", format!("写入失败：{err}")))?;
+
+    let bytes = {
+        let state = app.state::<AppState>();
+        with_session(state.inner(), |session| {
+            store::seal_with_password(&password, &session.vault)
+        })?
+    };
+
+    // 写盘顺序与 storage.rs 的口径一致：临时文件 → 旧文件挪成 .bak → 改名。
+    // 这样任何一步失败都能把旧的放回去；"先删旧的再改名"一旦改名失败就会两头落空。
+    let mut tmp_name = path.clone().into_os_string();
+    tmp_name.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp_name);
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|err| AppError::new("io", format!("写入失败：{err}")))?;
+        let failed = file.write_all(&bytes).and_then(|()| {
+            // 断电时"改名成功但内容没落盘"是备份最不该有的失败方式
+            file.sync_all()
+        });
+        if let Err(err) = failed {
+            // 半截临时文件别留着：下次导出会 truncate 覆盖，但它会让人误以为有备份
+            let _ = std::fs::remove_file(&tmp);
+            return Err(AppError::new("io", format!("写入失败：{err}")));
+        }
+    }
+
+    let mut bak_name = path.clone().into_os_string();
+    bak_name.push(".bak");
+    let bak = std::path::PathBuf::from(bak_name);
+    if path.exists() {
+        if bak.exists() {
+            let _ = std::fs::remove_file(&bak);
+        }
+        std::fs::rename(&path, &bak).map_err(|err| {
+            let _ = std::fs::remove_file(&tmp);
+            AppError::new("io", format!("写入失败：目标文件无法覆盖。（{err}）"))
+        })?;
+    }
+    if let Err(err) = std::fs::rename(&tmp, &path) {
+        if bak.exists() {
+            let _ = std::fs::rename(&bak, &path);
+        }
+        let _ = std::fs::remove_file(&tmp);
+        return Err(AppError::new("io", format!("写入失败：{err}")));
+    }
+    if bak.exists() {
+        let _ = std::fs::remove_file(&bak);
+    }
     Ok(Some(path.display().to_string()))
 }
 
@@ -378,22 +544,12 @@ pub async fn import_from(
     state: tauri::State<'_, AppState>,
     path: String,
     mode: MergeMode,
+    password: String,
 ) -> AppResult<ImportReport> {
     let bytes = std::fs::read(&path)
         .map_err(|err| AppError::new("io", format!("读不到这个文件：{err}")))?;
-    // 换过主密码后环境变量里还是旧值，这时"用旧主密码"会误报解密失败。
-    // 先试会话里的密钥（同盐 = 本机导出，含刚换过密码的情形），失败再退回环境变量。
-    let container = crypto::decode(&bytes)?;
-    let incoming = match state.session.lock() {
-        Ok(guard) if guard.as_ref().map(|session| session.salt == container.salt).unwrap_or(false) => {
-            let session = guard.as_ref().expect("刚判断过非空");
-            let plaintext = crypto::decrypt(&session.key, &container.nonce, container.ciphertext)?;
-            let vault: Vault = serde_json::from_slice(&plaintext)?;
-            vault.validate()?;
-            vault
-        }
-        _ => store::unseal(&bytes, &master::read()?)?,
-    };
+    // 备份只认导出时设的那个密码，与主密码无关：所以这里既不比对会话盐，也不读环境变量
+    let incoming = store::unseal_backup(&bytes, &password)?;
     let mut guard = state
         .session
         .lock()
@@ -426,8 +582,12 @@ pub async fn import_from(
 }
 
 /// 换主密码：先写盘成功，再换内存里的密钥——写失败时旧库还完好。
+/// 换完顺手同步环境变量，否则下次启动读到旧值，库就打不开了。
 #[tauri::command]
-pub async fn change_master(state: tauri::State<'_, AppState>, new_password: String) -> AppResult<()> {
+pub async fn change_master(
+    state: tauri::State<'_, AppState>,
+    new_password: String,
+) -> AppResult<ChangeMasterReport> {
     let mut guard = state
         .session
         .lock()
@@ -439,7 +599,14 @@ pub async fn change_master(state: tauri::State<'_, AppState>, new_password: Stri
 
     session.salt = new_salt;
     session.key = new_key;
-    Ok(())
+
+    // 库已经换好了，同步失败不能把整个操作判失败——但要把原因交回界面，
+    // 让用户知道现在库和环境变量不一致、需要点“设置/更新”重试。
+    let sync = master::write_user(&new_password);
+    Ok(ChangeMasterReport {
+        synced: sync.is_ok(),
+        message: sync.err().map(|err| err.message),
+    })
 }
 
 #[cfg(test)]
@@ -448,6 +615,8 @@ mod tests {
     //! 只把数据目录换成临时目录，其余与真实运行完全一致。
 
     use super::*;
+    use passlet_core::crypto;
+    use passlet_core::vault::Vault;
     use std::fs;
 
     const MASTER: &str = "correct horse battery staple";
@@ -603,5 +772,110 @@ mod tests {
 
         fs::remove_dir_all(&dir).ok();
         fs::remove_dir_all(&backup_dir).ok();
+    }
+
+    #[test]
+    fn 没有库文件也没有会话时任何主密码都算通过校验() {
+        let dir = temp_dir("verify-novault");
+        let state = AppState::default();
+        // 真正的首次使用：没库、也没有内存会话，没得比；界面靠“输两次”防笔误
+        verify_master(&state, &dir, "").unwrap();
+        verify_master(&state, &dir, "随便什么").unwrap();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 没有库文件但已有会话时改密码要跟会话对得上() {
+        let dir = temp_dir("verify-session");
+        let state = AppState::default();
+        {
+            // 模拟“从说明页设置完之后、还没写盘”的状态：会话已建立，库文件不存在
+            let mut guard = state.session.lock().unwrap();
+            *guard = Some(session_with(&[]));
+        }
+
+        verify_master(&state, &dir, MASTER).unwrap();
+        let err = verify_master(&state, &dir, "another password").unwrap_err();
+        assert_eq!(err.code, "wrong_master");
+        // 提示要把人引到“更换主密码”，否则用户会以为是自己记错了
+        assert!(err.message.contains("更换主密码"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 库存在时错密码报_wrong_master_而正确密码通过() {
+        let dir = temp_dir("verify");
+        let state = AppState::default();
+        persist_to(&session_with(&[("GitHub", "me", "p")]), &dir).unwrap();
+
+        let err = verify_master(&state, &dir, "another password").unwrap_err();
+        assert_eq!(err.code, "wrong_master");
+        // 提示要能直接给用户看，不能是底层错误
+        assert!(err.message.contains("打不开现有的密码库"));
+
+        verify_master(&state, &dir, MASTER).unwrap();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 库文件损坏时报文件问题而不是密码不对() {
+        let dir = temp_dir("verify-corrupt");
+        let state = AppState::default();
+        fs::write(dir.join(storage::VAULT_NAME), b"not a vault at all").unwrap();
+        let err = verify_master(&state, &dir, MASTER).unwrap_err();
+        // 报成“密码不对”会让用户白改密码，所以必须区分开
+        assert_ne!(err.code, "wrong_master");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `import_from` 需要 Tauri 的 `State`，单测里拿不到，所以这里复刻它的动作序列：
+    /// 读字节 → 用备份密码解 → 合并 → 写盘。命令壳的形参由契约测试盯，加密与合并由这里盯。
+    #[test]
+    fn 导出用备份密码封包导入同一密码才解得开() {
+        use_master(MASTER);
+        let dir = temp_dir("backup-import");
+        let session = session_with(&[("GitHub", "me", "p1")]);
+        persist_to(&session, &dir).unwrap();
+
+        // 备份里放一条当前库没有的条目，才能看出合并真的发生了
+        let other = session_with(&[("Gitee", "me", "p2")]);
+        let backup = store::seal_with_password("backup-pw-2026", &other.vault).unwrap();
+
+        // 密码错：在合并之前就失败，库文件一个字节都不该动
+        let before = fs::read(dir.join(storage::VAULT_NAME)).unwrap();
+        let err = store::unseal_backup(&backup, "wrong-backup-pw").unwrap_err();
+        assert_eq!(err.code, "decrypt_failed");
+        assert_eq!(err.message, store::BACKUP_DECRYPT_MESSAGE);
+        assert_eq!(fs::read(dir.join(storage::VAULT_NAME)).unwrap(), before);
+
+        // 拿主密码当备份密码：解不开——两条密码通道彻底分开
+        assert_eq!(
+            store::unseal_backup(&backup, MASTER).unwrap_err().code,
+            "decrypt_failed"
+        );
+
+        // 密码对：合并进当前库并写盘，重开后两条都在
+        let incoming = store::unseal_backup(&backup, "backup-pw-2026").unwrap();
+        let mut current = unlock_from(&dir).unwrap();
+        let stats = current.vault.merge_from(&incoming, MergeMode::Skip);
+        assert_eq!(stats.added, 1);
+        persist_to(&current, &dir).unwrap();
+        assert_ne!(fs::read(dir.join(storage::VAULT_NAME)).unwrap(), before);
+        let reopened = unlock_from(&dir).unwrap();
+        assert_eq!(reopened.vault.entries.len(), 2);
+        assert!(reopened.vault.entries.iter().any(|e| e.platform == "Gitee"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 主密码状态报告与_active_判定一致() {
+        let info = master_info();
+        assert!(["process", "user", "machine", "none"].contains(&info.active));
+        let any = info.process_env || info.user_registry || info.machine_registry;
+        assert_eq!(info.active == "none", !any);
+        if info.active == "process" {
+            assert!(info.process_env);
+        }
     }
 }
