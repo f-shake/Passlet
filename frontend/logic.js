@@ -15,8 +15,10 @@
   }
 
   /**
-   * 自动补全的匹配打分：前缀命中(0) 优于子串命中(1)，不命中返回 null。
-   * 前缀优先是为了让“打两个字母就能选到”成立，否则子串命中会把目标挤下去。
+   * 自动补全的匹配打分：字面前缀命中(0) 优于字面子串(1)，
+   * 再往后才是拼音开头(2) 与拼音中间(3)；都不命中返回 null。
+   * 前缀优先是为了让“打两个字母就能选到”成立，否则子串命中会把目标挤下去；
+   * 拼音两档垫底，是为了让“明明有字面同名项”时不会被拼音结果抢到前面。
    */
   function matchScore(label, query) {
     const q = normalizeKey(query);
@@ -25,7 +27,7 @@
     if (!l) return null;
     if (l.startsWith(q)) return 0;
     if (l.includes(q)) return 1;
-    return null;
+    return pinyinMatch(label, query);
   }
 
   /** 过滤下拉选项：命中的按打分升序，同分保持原顺序（稳定排序）。 */
@@ -39,13 +41,172 @@
     return scored.map(item => item.value);
   }
 
-  /** 清单过滤：平台或用户名任一命中即保留，忽略大小写。 */
+  /** 清单过滤：平台或用户名任一命中即保留（字面或拼音），忽略大小写。 */
   function filterEntries(entries, query) {
     const q = normalizeKey(query);
     if (!q) return entries.slice();
     return entries.filter(entry =>
-      normalizeKey(entry.platform).includes(q) || normalizeKey(entry.username).includes(q)
+      matchScore(entry.platform, query) !== null || matchScore(entry.username, query) !== null
     );
+  }
+
+  /* ---------------- 拼音匹配 ----------------
+     字表在 frontend/pinyin-data.js（生成物，见 scripts/gen-pinyin-data.mjs）。
+     只在第一次真要匹配时才解析成 Map：启动路径不碰它，开机不变慢。
+     测试用 setPinyinTable 注入假表，因此单测不依赖那张 155 KB 的真表。 */
+
+  let pinyinIndex = null;
+  let pinyinProbed = false;
+
+  // 上限只为挡病态输入：真实平台名远短于这两个值，超了就走纯字面匹配，不影响正确性。
+  const PINYIN_MAX_QUERY = 64;
+  const PINYIN_MAX_LABEL = 128;
+  const PINYIN_QUERY_RE = /^[a-z0-9]+$/;
+  const PINYIN_SYLLABLE_RE = /^[a-z]+$/;
+
+  /** 两串原始数据 → Map<char, string[]>；结构不对返回 null，调用方据此整体关掉拼音路径。 */
+  function parsePinyinTable(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    if (typeof raw.chars !== "string" || typeof raw.readings !== "string") return null;
+    const chars = Array.from(raw.chars);
+    const readings = raw.readings.split(",");
+    if (chars.length === 0 || chars.length !== readings.length) return null;
+    if (typeof raw.count === "number" && raw.count !== chars.length) return null;
+    const map = new Map();
+    for (let i = 0; i < chars.length; i += 1) {
+      const list = readings[i].split("/");
+      for (const syllable of list) {
+        if (!PINYIN_SYLLABLE_RE.test(syllable)) return null;
+      }
+      map.set(chars[i], list);
+    }
+    return map;
+  }
+
+  function getPinyinMap() {
+    if (pinyinProbed) return pinyinIndex;
+    pinyinProbed = true;
+    const raw = root.PassletPinyin;
+    pinyinIndex = parsePinyinTable(raw);
+    if (raw && !pinyinIndex && typeof console !== "undefined" && console.warn) {
+      console.warn("拼音表已损坏，已关闭拼音匹配");
+    }
+    return pinyinIndex;
+  }
+
+  /**
+   * 注入或清空拼音表。传 undefined 恢复成「下次自动从全局读」，
+   * 免得多条用例之间互相污染。
+   */
+  function setPinyinTable(map) {
+    if (map === undefined) {
+      pinyinProbed = false;
+      pinyinIndex = null;
+      return;
+    }
+    pinyinProbed = true;
+    pinyinIndex = map instanceof Map ? map : null;
+  }
+
+  /**
+   * 标签 → 匹配用的字序列。
+   * 空白直接跳过（「Xiao Mi」也能用 xiaomi 命中）；汉字给全部读音；
+   * 其它字符原样当一个「音节」，只能整字符命中——把标点当分隔符会让跨边界的误命中变多。
+   */
+  function labelTokens(text, map) {
+    const tokens = [];
+    for (const ch of String(text)) {
+      if (/\s/.test(ch)) continue;
+      const readings = map.get(ch);
+      tokens.push(readings ? readings.slice() : [ch.toLowerCase()]);
+    }
+    return tokens;
+  }
+
+  /**
+   * 从 tokens[start] 起，查询能否被完全消耗掉。
+   * 每个字有三条走法：出全拼、只出首字母、查询在音节中间用完（尾部未打完）；
+   * 只有最后一条允许「没打完」，因为查询确实到头了。
+   */
+  function matchTokens(tokens, start, q) {
+    let states = new Set([0]);
+    for (let t = start; t < tokens.length; t += 1) {
+      const next = new Set();
+      for (const j of states) {
+        for (const syllable of tokens[t]) {
+          const rest = q.length - j;
+          if (rest >= syllable.length && q.startsWith(syllable, j)) {
+            if (rest === syllable.length) return true;
+            next.add(j + syllable.length);
+          }
+          if (q[j] === syllable[0]) {
+            if (rest === 1) return true;
+            next.add(j + 1);
+          }
+          if (rest < syllable.length && syllable.startsWith(q.slice(j))) return true;
+        }
+      }
+      if (next.size === 0) return false;
+      states = next;
+    }
+    return false;
+  }
+
+  /**
+   * 拼音命中：2 = 从标签第一个字开始命中，3 = 从中间某个字开始。
+   * 只有纯字母数字查询才走这里；带 @ 、空格以外标点的查询照旧走字面，
+   * 免得「xiao@」这种半截输入被拼音规则猜出奇怪结果。
+   */
+  function pinyinMatch(label, query) {
+    const q = String(query == null ? "" : query).trim().toLowerCase().replace(/\s+/g, "");
+    if (!q || q.length > PINYIN_MAX_QUERY || !PINYIN_QUERY_RE.test(q)) return null;
+    const text = String(label == null ? "" : label);
+    if (!text || text.length > PINYIN_MAX_LABEL) return null;
+    const map = getPinyinMap();
+    if (!map) return null;
+    let hasHanzi = false;
+    for (const ch of text) {
+      if (map.has(ch)) {
+        hasHanzi = true;
+        break;
+      }
+    }
+    if (!hasHanzi) return null;
+
+    const tokens = labelTokens(text, map);
+    if (!tokens.length) return null;
+    if (matchTokens(tokens, 0, q)) return 2;
+    for (let start = 1; start < tokens.length; start += 1) {
+      // 从中间开始时，查询首字母必须能对上那个字的某个读音，否则整段跳过——
+      // 少了这一步，长标签会被逐字试探，白跑几十次不可能命中的匹配。
+      if (!tokens[start].some(syllable => syllable[0] === q[0])) continue;
+      if (matchTokens(tokens, start, q)) return 3;
+    }
+    return null;
+  }
+
+  /**
+   * 表单里账号框的候选（Q7=A）：平台精确命中已有平台时只列该平台的用户名，
+   * 否则（空、或正在敲一个库里没有的新平台）列全部用户名。
+   * 去重按 normalizeKey，保留首次出现顺序。
+   */
+  function formAccountOptions(entries, platformText) {
+    const key = normalizeKey(platformText);
+    const scoped = key
+      ? entries.filter(entry => normalizeKey(entry.platform) === key)
+      : [];
+    const source = scoped.length > 0 ? scoped : entries;
+    const seen = new Set();
+    const list = [];
+    for (const entry of source) {
+      const username = String(entry.username == null ? "" : entry.username).trim();
+      if (!username) continue;
+      const dedupeKey = normalizeKey(username);
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      list.push(username);
+    }
+    return list;
   }
 
   /** 数字输入钳制：非数字/越界一律回落到默认值，避免把 NaN 写进配置。 */
@@ -306,11 +467,36 @@
     return chars.length > limit ? chars.slice(0, limit).join("") : text;
   }
 
+  /**
+   * 下拉的按键决策（纯函数，便于单测；DOM 部分留给 app.js）。
+   * 输入：按键名 + 当前状态（弹层是否打开、候选数、是否在输入法组合输入中）。
+   * 输出：open（把弹层叫出来）/ close（只收弹层）/ next / prev / accept，或 null（不接管）。
+   *
+   * 组合输入期间一律返回 null：那时 Enter 是给输入法上屏的，接管会把中文打不出来。
+   */
+  function comboAction(key, state) {
+    const s = state || {};
+    if (s.composing) return null;
+    const open = Boolean(s.open);
+    const count = Number(s.count) > 0 ? Number(s.count) : 0;
+    if (key === "Enter") return open && count > 0 ? "accept" : null;
+    if (key === "Escape") return open ? "close" : null;
+    if (key !== "ArrowDown" && key !== "ArrowUp") return null;
+    if (!open) return "open";
+    if (count === 0) return null;
+    return key === "ArrowDown" ? "next" : "prev";
+  }
+
   root.PassletLogic = {
     normalizeKey,
     matchScore,
     filterOptions,
     filterEntries,
+    setPinyinTable,
+    getPinyinMap,
+    pinyinMatch,
+    formAccountOptions,
+    comboAction,
     clampInt,
     maskText,
     validateEntry,

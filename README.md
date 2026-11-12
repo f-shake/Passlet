@@ -92,6 +92,17 @@ setx PASSLET_MASTER "你的主密码"
 - **插件目录不在安装包里**（`frontendDist` 是嵌进二进制的）。把仓库里的 `generators\` 拷到
   `passlet.exe` 同级，或在环境变量 `PASSLET_GENERATOR_DIR` 里指向它；开发时（`pnpm dev`）自动读仓库根那份
 
+**拼音补全**
+
+平台、用户名、清单搜索、新增/编辑表单里的平台与用户名都能用拼音匹配：`小米` 打 `xm`、`xiao`、
+`xiaomi`、`xiao mi` 都行，没打完也算（`xiaom`）。多音字全部读音参与（`长城` 打 `cc`、`changcheng`、
+`zhangcheng` 都命中）。排序先字面后拼音：字面前缀 > 字面子串 > 拼音开头 > 拼音中间；
+下拉支持 `↑`/`↓` 移动（鼠标悬停也跟着高亮）、`Enter` 选中。`Esc` 分两段：弹层开着时
+第一下只收起下拉、已填内容不动；弹层已收起时再按才会关掉表单（等于放弃这次修改）。
+
+字表 20,856 字（约 156 KB，来源 pinyin-pro，MIT），生成脚本见 `scripts/gen-pinyin-data.mjs`，
+运行时不联网、不依赖任何 npm 包。
+
 ---
 
 ## 数据文件与备份
@@ -229,6 +240,7 @@ frontend/          界面（纯静态 HTML/CSS/JS，无构建）
   styles.css       daisyUI 之上的布局与主题变量
   vendor/          daisyUI 5 的完整 CSS（不走 Tailwind，也不需要构建）
   logic.js         纯函数：匹配、过滤、钳制（可单测）
+  pinyin-data.js   拼音字表（生成物，`node scripts/gen-pinyin-data.mjs`）
   api.js           调 Rust 命令的薄封装
   app.js           视图状态机与渲染
   demo-api.js      仅预览构建使用

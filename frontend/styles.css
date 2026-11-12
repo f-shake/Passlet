@@ -197,6 +197,13 @@ html.demo .app-window[data-view="error"]{width:462px;height:272px;}
   white-space:nowrap;
 }
 .combo-pop .opt:hover{background:var(--color-base-200);}
+/* 键盘高亮：底色与 :hover 一致，另加左侧竖条——只看底色在深色主题下太弱，
+   而用户按 ↑/↓ 时必须一眼看出回车会选中哪一行。 */
+.combo-pop .opt.active{
+  background:var(--color-base-200);
+  font-weight:500;
+  box-shadow:inset 2px 0 0 var(--color-primary);
+}
 .combo-pop .opt.sel{
   background:color-mix(in oklab, var(--color-primary) 12%, transparent);
   color:var(--color-primary);

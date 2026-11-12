@@ -33,6 +33,12 @@ html = inline(
   '<link rel="stylesheet" href="styles.css">',
   `<style>\n${read("styles.css")}\n</style>`
 );
+// 拼音字表要在 logic.js 之前就位，否则预览里的补全只剩字面匹配
+html = inline(
+  html,
+  '<script src="pinyin-data.js"></script>',
+  `<script>\n${read("pinyin-data.js")}\n</script>`
+);
 html = inline(html, '<script src="logic.js"></script>', `<script>\n${read("logic.js")}\n</script>`);
 // demo-api 必须在 api.js 之前注入，api.js 靠它兜底
 html = inline(

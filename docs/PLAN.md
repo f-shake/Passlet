@@ -1419,3 +1419,297 @@ FieldDef     = { key: String, label: String, placeholder?: String, required?: Bo
 老 `config.json` 兼容只补 `generator` 一项；目录解析三来源与 F10 一致；插件给的所有文案都过 `esc()`。
 
 修复后自测：前端 4 个测试文件 101 条全绿；重建后 E2E 5 个场景全过（新增「进视图不自动复制」「清空后回到灰字提示且不改写剪贴板」两条断言）。
+
+## 追加需求：平台/账号的拼音自动补全（2026-11-12 提出，待确认后实施）
+
+### PY0 背景与已知输入
+
+用户原话：
+
+> 我还需要增强，平台、账号，当我输入拼音的时候也要能自动完成。比如”小米“，我打 xm 或者 xiaomi 都应该能出来，没打完也一样
+
+现状事实（计划阶段查证，不是假设）：
+
+| 事实 | 出处 |
+|---|---|
+| 查询页平台/账号是两个联动弹层，候选由 `platformList()` / `userList(platform)` 从 `S.entries` 现算 | `frontend/app.js` 290–308、363–378 |
+| 过滤与排序在纯函数层：`filterOptions` → `matchScore`，只比字面（前缀 0 / 子串 1），同分按原索引稳定排序 | `frontend/logic.js` 21–40 |
+| 清单页 `#filterInput` 走 `filterEntries`，同一套字面规则 | `frontend/logic.js` 43–49、`app.js` 558 |
+| 前端无构建步骤：`logic.js` 用 IIFE 挂 `globalThis.PassletLogic`，`file://` 双击也能跑 | `frontend/logic.js` 1–5 |
+| 新增 `frontend/*.js` 会自动进 exe：`frontendDist` 指整目录，`build.ps1` 的源文件清单含整个 `frontend` | `src-tauri/tauri.conf.json` 7、`build.ps1` 120–129 |
+| 预览工具逐脚本内联，新增数据文件必须补一行，否则预览里拼音失效 | `scripts/build-preview.mjs` 24–43 |
+| 当前没有任何键盘导航（无 `keydown` 处理），候选只能鼠标点 | `frontend/app.js`（全文件只有弹窗 Esc） |
+| 本机无 `pypinyin`、无 `PinYinConverter`；npm registry 可达 | 计划阶段实测 |
+| 拼音字典覆盖面（计划阶段实测 pinyin-pro 3.29.5）：CJK 基本区 **20,856** 字，**2,420** 字有多种读音（去重后最多 5 个），音节 413 个；编码成「字串 + 读音串」= **155.5 KB 源文本 / 49.0 KB brotli**；只收 GB2312 的 6,763 字 ≈ 74 KB 源 / 25 KB brotli | `temp/pinyin-probe`（可删） |
+
+### PY1 功能需求
+
+每条都能被一条单测或一条端到端断言验证。
+
+| # | 需求 | 可验证的表述 |
+|---|---|---|
+| R1 | 平台框拼音命中 | 库里有 `小米` 时，输入 `xm` / `xiaom` / `xiaomi` / `XIAO` / `xiao mi`，`小米` 都出现在候选里 |
+| R2 | 账号框拼音命中 | 选中 `小米` 后，账号框里输入某用户名（中文）的拼音或首字母，该用户名出现在候选里；未选平台时账号框仍不可用（同今天） |
+| R3 | 不改变字面命中的相对顺序 | 打分档：字面前缀 `0` < 字面子串 `1` < 拼音开头 `2` < 拼音中间 `3`；同档保持原索引顺序（稳定排序） |
+| R4 | 混拼 | 同一个字既可以出全拼也可以只出首字母：`xmsj`、`xiaomishouji`、`xiaomsj` 都能命中 `小米手机` |
+| R5 | 尾部未打完 | 查询是某一字音节的**前缀**即算命中（`xiao`、`xiaom`、`xiaomish` 都行）；打错一个字母不命中（`xian` 不是 `xiao` 的前缀，故不命中 `小米`） |
+| R6 | 多音字 | 全部读音参与：`长城` 用 `cc` / `changcheng` / `zhangcheng` 都命中 |
+| R7 | 非拼音查询不受影响 | 查询里出现 `[a-z0-9 ]` 以外的字符（`@`、`-`、中文本身）时，拼音路径不参与，行为与今天逐字一致 |
+| R8 | 空查询 | 返回全部候选，顺序与今天一致 |
+| R9 | 表不可用时降级 | 拼音表缺失/损坏时只走字面匹配，不弹错误、不阻断输入 |
+| R10 | 既有交互不变 | 弹层开合、`fitPop` 翻转与高度、失焦还原、选中回填、`set_view` 尺寸等行为不变 |
+| R11 | 表单平台框也能补全（Q1=C） | 新增/编辑弹窗里的「平台名」输入：输入拼音或字面都能列出库里已有平台；**同时仍可自由输入库里没有的新平台**（不强制从候选里选） |
+| R12 | 表单账号框也能补全（Q1=C） | 新增/编辑弹窗里的「账号」输入：候选按 Q7 定的范围来（当前平台/全部），同样可自由输入新账号 |
+| R13 | 清单搜索框接拼音（Q1=C） | 清单页 `#filterInput` 输入 `xm` 能筛出平台为 `小米` 的记录；英文部分行为不变 |
+
+### PY2 技术方案（选型 + 否决理由）
+
+**选定**：纯前端匹配 + **构建期生成的静态字表**（表进 git，运行时不依赖任何 npm 包，全程离线）。
+
+理由：
+
+1. 现有过滤是同步纯函数，单测直接覆盖；把匹配放在前端就不引入异步、不新增 IPC、不改下拉交互时序。
+2. 表是一次生成、长期使用的只读数据；49 KB（brotli 后）换 20,856 字覆盖率，exe 从 3.86 MB 到约 3.91 MB，可接受。
+3. 生成脚本只在「想更新字表」时手动跑，日常构建/测试/打包完全不联网。
+
+**否决的备选**：
+
+| 方案 | 否决理由 |
+|---|---|
+| Rust 侧 `pinyin` crate + 新 IPC 过滤 | 下拉过滤变异步，每敲一个键一次 IPC；`fitPop` 依赖同步渲染，时序全要重排；现有 `matchScore` 单测作废。收益只是省一张 155 KB 的静态表 |
+| 运行时直接内嵌 pinyin-pro（约 1 MB dist，含 300 KB 字典） | 要把前端改成 ESM/打包，或加一层动态加载；CSP 与 `file://` 双开都要重新验证。为省一个生成脚本付出这个代价不划算 |
+| 手写「常用 3500 字」表 | 覆盖率由人肉决定：新增一个平台就漏，用户无从预期。违反「输入即命中」 |
+| 用 Windows 自带 `PinYinConverter` / 系统 IME 取音 | 本机无该程序集；IME 没有可供调用的取音接口 |
+
+**编码细节**：
+
+- `frontend/pinyin-data.js` 只放两条字符串：`chars`（每字一个字符，共 20,856 个，全部在 BMP 内）与 `readings`（`,` 分字、`/` 分读音，全部去声调，纯 `[a-z]`）。
+- `logic.js` 首次需要拼音时才把 `readings` 切数组、按 `chars[i]` 建 `Map` 缓存（一次 `split`，约 2 万项，实测亚毫秒级）；启动路径不解析，开机不变慢。
+- 声调一律去掉：用户不会打声调，带调表只是浪费体积。
+- 数据来源 pinyin-pro 3.29.5（MIT），出处写进生成脚本头部、本节与 README。
+
+### PY3 系统结构
+
+```
+frontend/pinyin-data.js   globalThis.PassletPinyin = { source, chars, readings }
+        │（脚本标签按序加载）
+        ▼
+frontend/logic.js         惰性索引 getPinyinMap() → Map<char, string[]>
+                          matchScore(label, query) → 0|1|2|3|null（新增 2/3 两档）
+        │
+        ├─ filterOptions(options, query)   ← 签名不变，仅打分变（查询页下拉 + 表单下拉共用）
+        └─ filterEntries(entries, query)   ← 接拼音（清单搜索，Q1=C）
+        ▼
+frontend/app.js           renderPopContent() / 清单渲染；键盘与提示（按 Q5/Q6）
+        ▼
+                       DOM / 剪贴板 / IPC 均不变
+```
+
+新增调用只有一个方向：app.js → logic.js → pinyin-data.js 的只读全局。logic.js 仍然不碰 DOM、不调后端；pinyin-data.js 不含任何逻辑。
+
+### PY4 数据结构
+
+```js
+// frontend/pinyin-data.js —— 生成物，不手改
+globalThis.PassletPinyin = {
+  source: "pinyin-pro@3.29.5",
+  count: 20856,          // chars.length，供启动自检
+  chars: "㐀㐁…",         // 长度 = count，字符均属 U+4E00–U+9FFF
+  readings: "a/a,ai/ai,…" // 与 chars 一一对应；`/` 分读音，`,` 分字
+};
+```
+
+logic.js 新增/变更的导出（字段级）：
+
+| 名字 | 签名 | 说明 |
+|---|---|---|
+| `setPinyinTable` | `(map: Map<string, string[]> \| null) => void` | 注入或清空；测试只依赖它，不依赖真表 |
+| `getPinyinMap` | `() => Map<string, string[]> \| null` | 惰性解析 `globalThis.PassletPinyin`；`chars` 与 `readings` 段数不一致、或含非 `[a-z]` 音节 → 返回 `null` 并缓存，拼音路径关闭 |
+| `pinyinMatch` | `(label: string, query: string) => 2 \| 3 \| null` | `2` = 拼音开头命中，`3` = 拼音中间命中 |
+| `matchScore` | `(label, query) => 0 \| 1 \| 2 \| 3 \| null` | **签名不变**，新增两档；字面仍优先 |
+| `filterOptions` | `(options, query) => string[]` | 不变（内部靠 `matchScore`） |
+| `filterEntries` | `(entries, query) => Entry[]` | 接拼音（R13，清单搜索） |
+| `formAccountOptions` | `(entries, platformText) => string[]` | 表单账号框的候选（范围按 Q7；去重、保持首次出现顺序） |
+
+不变：`normalizeKey`、`maskText`、`clampInt`、`validate*`、生成器相关函数。`Entry` / `Vault` / `Config` 一律不改——**本需求不碰任何存储格式**。
+
+### PY5 模块划分（职责 / 不负责什么）
+
+| 模块 | 负责 | 不负责 |
+|---|---|---|
+| `frontend/pinyin-data.js` | 存字与读音两串 | 不做切分、不做匹配、不做排序、不含任何可执行逻辑 |
+| `frontend/logic.js` | 惰性建索引、拼音匹配、打分与排序 | 不碰 DOM；不读文件；不生成表；不判断「该不该显示提示」 |
+| `scripts/gen-pinyin-data.mjs` | 从 pinyin-pro 生成两串、自检长度与字符集、打印体积 | 不参与运行时；不在 build/test 流程里自动跑 |
+| `frontend/app.js` | 把 `filterOptions` 结果渲染成 DOM；弹层开合；键盘与提示（按 Q5/Q6） | 不实现任何拼音规则；不缓存索引 |
+| `scripts/build-preview.mjs` | 预览时内联新数据文件 | 不改运行时代码 |
+
+### PY6 交互逻辑
+
+**查询页（沿用现有结构，只换过滤函数）**
+
+1. 焦点进入平台框 → 弹层展开，空查询＝全部候选（同今天）。
+2. 每次 `input` → `filterOptions(platformList(), value)` → 重绘候选；拼音命中项按 R3 排到字面命中之后。
+3. 点候选（`pointerdown`）→ `selectPlatform` → 清空账号、若唯一用户名则自动选中（同今天）。
+4. 失焦：输入框还原为「已选值」，未选中的输入丢弃（同今天）。
+
+**键盘（Q5=A，三个下拉一致：查询页平台、查询页账号、表单两个框）**
+
+5. 弹层打开时 `↓`/`↑` 移动高亮，默认高亮第一项；高亮项不改变输入框内容。
+6. `Enter` 选中高亮项并回填，关闭弹层，输入框失去焦点（查询页会顺带走既有的选中分支）。
+7. `Esc`：弹层开着就先关弹层、保留输入内容、**不连带关闭弹窗**（`stopPropagation`）；弹层已关时维持今天的行为——表单里 `Esc` 关闭弹窗＝放弃修改，不新增语义。
+8. 输入法组合输入期间（`compositionstart` → `compositionend`）不接管 `↑`/`↓`/`Enter`/`Esc`，交给 IME 上屏。
+9. 鼠标悬停某行时高亮跟随（与 `↑`/`↓` 共用同一个高亮下标），避免“鼠标在这儿、键盘选那儿”。
+
+**表单（Q1=C，新增的两个下拉）**
+
+10. 新增/编辑弹窗里，平台框与账号框各自带一个内联候选弹层；**聚焦即展开**（Q9=A）、空白＝全部，输入即过滤（复用 `filterOptions`，拼音规则相同）。
+11. 点候选或按 `Enter` → 回填输入框（只回填，不提交表单）；随后焦点留在该框，可继续输入或 Tab 到下一个字段；Tab/失焦时收起弹层，**输入框保留用户已输入的内容**（表单里的框允许自由文本，不像查询页那样还原）。
+12. 候选只是建议：输入框内容不被强制校验成候选之一，用户可以直接敲一个库里没有的新平台/新账号。
+13. 表单里选中平台候选后**不自动填充账号**（新记录不猜）。账号候选范围按 Q7=A：平台框内容**精确命中**某个已有平台（`normalizeKey` 相同）→ 只列该平台的用户名；否则（空、或库里没有的新平台）→ 列全部用户名，跨平台去重、保持首次出现顺序。
+14. 表单里的弹层被弹窗容器裁切或高度不够时，翻到输入框上方（沿用 `fitPop` 的翻转思路），仍然放不下就限高滚动。
+
+**拼音提示（Q6=A）**：不做。候选行保持纯文本，不加灰字全拼、不加高亮片段。
+
+### PY7 异常情况（表现与提示文案）
+
+| 场景 | 表现 |
+|---|---|
+| `pinyin-data.js` 未加载（404、被删） | 拼音路径静默关闭，字面匹配照常；**不弹任何错误**（本功能不阻断查询） |
+| 表损坏（`chars` 与 `readings` 段数不符、音节含非 `[a-z]`） | 同上；开发构建下 `console.warn("拼音表已损坏，已关闭拼音匹配")` 一次 |
+| 生成脚本失败（npm 不可达、包版本不存在） | 与运行时无关：表已在仓库里，构建照常；脚本退出码非 0 并打印失败原因 |
+| 查询超长（> 64 字符） | 拼音路径直接跳过（字面仍生效），避免病态匹配 |
+| 标签含代理对（emoji）或生僻扩展区字 | 按「非 CJK」处理，只参与字面匹配；不报错 |
+| 输入法组合输入中按 Enter | 不拦截，交给 IME 上屏（见 PY6.8） |
+| 表单弹层被弹窗裁切 | 先翻到上方，仍放不下则限高滚动（`max-height` + `overflow:auto`），不撑高弹窗 |
+| 弹窗关闭时弹层还开着 | 关闭弹窗前先收起弹层，不留悬空节点 |
+| 用户键入全角字母（`ｘｍ`） | 不做归一化，按字面处理（明确不做，README 不承诺） |
+
+### PY8 边界条件
+
+| 场景 | 约定 |
+|---|---|
+| 空库 / 空候选 | 同今天：「还没有密码，点“打开清单”新增」 |
+| 查询为单字母 `x` | 可能命中大量拼音开头项；弹层最大高度仍由 `fitPop` 收到 150 px，可滚动 |
+| 查询全是空格 | `normalizeKey` 后为空 → 视为空查询，返回全部 |
+| 标签 1 个字（`米`） | 拼音匹配要求整个标签消耗完查询；`m`/`mi` 命中，`mix` 不命中 |
+| 同一字多读音去重 | 去声调后重复的读音合并，单字最多 5 个读音 |
+| 大小写 | 一律小写比较（沿用 `normalizeKey`） |
+| 标签里混有 ASCII（`小米商城App`） | ASCII 部分按单字符字面参与同一条匹配路径，`xiaomishangchengapp` 可命中 |
+| 同分候选顺序 | 与原数组下标一致（稳定） |
+| 表版本变化 | `source` 记录版本；`count` 与 `chars.length` 不符时视为损坏 |
+| 表单平台框为空 / 敲的是新平台 | 账号候选＝全部用户名（去重、保序），不报错、不拦输入 |
+| 同一账号出现在多个平台 | 全量候选里只出现一次，保留首次出现的位置 |
+| 库里 0 条记录 | 表单两个下拉都没有候选：不弹空层，输入框照常可敲 |
+| 表单弹层在弹窗最底部 | 向上翻；上下都不够时按可用空间限高滚动 |
+| `Esc` 连按 | 第一下收弹层、第二下关弹窗（关弹窗＝放弃修改，同今天） |
+
+### PY9 修改范围（文件清单 · 基线）
+
+| 文件 | 动作 |
+|---|---|
+| `docs/PLAN.md` | 追加本节（计划产物，不算改动） |
+| `package.json` / `pnpm-lock.yaml` | 加 `pinyin-pro` 到 `devDependencies`（**仅生成脚本用**，不进产物） |
+| `scripts/gen-pinyin-data.mjs` | **新增**：生成 `frontend/pinyin-data.js`，自带长度/字符集自检与体积打印 |
+| `frontend/pinyin-data.js` | **新增**：生成物（约 155 KB），进 git |
+| `frontend/logic.js` | 惰性索引 + `pinyinMatch` + `matchScore` 接入（+ `filterEntries` 视 Q1） |
+| `frontend/index.html` | 在 `logic.js` **之前**加 `<script src="pinyin-data.js"></script>`；表单的平台/账号两个 `.wrap` 包成 `.combo` 结构 + 弹层容器（搜索框与弹窗结构不动） |
+| `frontend/app.js` | 键盘导航与 `Enter`/`Esc`（Q5）、表单两个内联下拉（R11/R12）、清单搜索接上的渲染路径 |
+| `frontend/styles.css` | 表单内联弹层的定位/层级/裁切处理（复用 `.combo-pop` 样式，必要时给弹窗容器开 `overflow:visible`） |
+| `scripts/build-preview.mjs` | 内联 `pinyin-data.js`，否则预览里拼音失效 |
+| `tests/pinyin.test.js` | **新增**：假表驱动的匹配/排序/边界单测 |
+| `tests/pinyin-data.test.js` | **新增**：真表完整性抽查 + 体积预算 |
+| `tests/combo-form.test.js` | **新增**：`formAccountOptions` 的候选范围、去重与顺序 |
+| `README.md` | 一句话：支持拼音/首字母补全，字表来源与体积 |
+| `temp/e2e-pinyin.ps1` | **新增**：端到端脚本（`temp/` 不进 git） |
+
+不动：`core/`（全部）、`cli/`、`src-tauri/`（含 `tauri.conf.json`、CSP）、`generators/`、vault 容器格式、导出/导入格式、窗口尺寸表、`build.ps1`。
+
+### PY10 实现步骤
+
+1. `pnpm add -D pinyin-pro`，写 `scripts/gen-pinyin-data.mjs`（反转字典、去声调、按字排序、自检、打印体积），跑一次生成 `frontend/pinyin-data.js`。
+2. 核对生成结果：`count` = 20,856±0、音节集合只含 `[a-z]`、抽查 `小米 / 长城 / 华为 / 乐 / 银行`。
+3. `logic.js`：`setPinyinTable` / `getPinyinMap`（惰性 + 损坏检测）+ 单测（假表）。
+4. `logic.js`：`pinyinMatch` 的 DP（逐字取「全拼 / 首字母」两种走法，只允许最后一段是前缀）+ 单测 R4/R5/R6。
+5. `logic.js`：`matchScore` 接两档、`filterOptions` 保持稳定排序、`filterEntries` 接拼音 + 单测 R3/R7/R8/R13。
+6. `logic.js`：`formAccountOptions`（按 Q7 的候选范围、去重、保序）+ 单测。
+7. `index.html` + `scripts/build-preview.mjs`：接上数据脚本；跑 `pnpm preview`，在预览里手点一遍 `xm`。
+8. `app.js`（+ `styles.css`）：三个下拉统一键盘（`↑`/`↓`/`Enter`/`Esc`，IME 组合期不接管，鼠标悬停跟随高亮）。
+9. `app.js` + `index.html` + `styles.css`：表单平台/账号两个内联下拉（复用 `filterOptions`，只回填不提交，允许自由输入），处理弹窗内裁切与翻转。
+10. `tests/pinyin-data.test.js` + `tests/combo-form.test.js`：真表抽查与体积预算；表单候选范围。
+11. `temp/e2e-pinyin.ps1`：起 debug 版，用 UIA `ValuePattern` 填 `xm`、`xiaom`、`xian`（负例），断言候选内含 `小米`；表单里再走一遍；清单搜索框填 `xm` 断言筛出结果。
+
+### PY13 复核记录（2026-11-12，阶段三）
+
+独立子代理第 1 轮报 10 条，主代理逐条复核后**全部属实**（问题 3、4 判「部分属实」，按同一修法处理），全部修复：
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | Q5/PY6.9 要求「鼠标悬停跟随高亮」没实现 | 两处下拉都加 `pointerover` 委托（`bindOptionHover`），命中的行写回同一个高亮下标；只切换类、不重建列表，避免鼠标下的节点被换掉 |
+| 2 | 平台框按 Enter 会清掉已选用户名 | `setComboOpen` 改为按输入框当前值定位高亮；`comboKeydown` 选中项与当前值相同时只收弹层；`blur` 也不再重选同一个平台（否则「确认一下」就丢账号） |
+| 3 | 表单用户名弹层压住「保存／取消」 | 表单下拉的 `bounds` 从整个 `.dlg` 收到 `.dlg-body`；`fitPop` 的下限从 56 改 29（一行高），避免空间只剩三十几像素时顶出边界 |
+| 4 | `.dlg.has-combo` 放开溢出后失去滚动兜底 | 删掉 `has-combo` 那套覆盖，`.dlg` 与 `.dlg-body` 的 `overflow` 恢复原样；弹层改为以正文为界，不再需要「逃出」容器 |
+| 5 | 键盘/Esc/表单下拉的 DOM 行为在仓库里没有测试 | 把按键决策表抽成 `logic.js` 的纯函数 `comboAction`，新增 `tests/combo-key.test.js`（11 条）；app.js 两处只做 DOM 落地。真正的时序（pointerdown 抢 blur、Esc 两段）仍由 `temp/e2e-pinyin.ps1` 覆盖，已在 PY11 写明 |
+| 6 | 「警告只打一次」的用例没真的验证只打一次 | 连调三次后仍断言 `warns.length === 1` |
+| 7 | 生成脚本把来源版本写死 | 改读 `node_modules/pinyin-pro/package.json` 的 `version` 并重新生成；`tests/pinyin-data.test.js` 改为与已安装版本等值比对 |
+| 8 | `modal.body.classList.add("has-combo")` 是死代码 | 随问题 4 一起删除，`has-combo` 这个类名不再存在 |
+| 9 | `setComboOpen(which, false)` 分支永不执行 | 签名收成 `setComboOpen(which)`，6 处调用点同步 |
+| 10 | README 的 Esc 描述与实现不符；PLAN 实施步骤「9.」重复 | README 改成两段式原话；删掉重复的那一步 |
+
+第 5 条的取舍：DOM 时序不进仓库测试，是因为引入 jsdom/happy-dom 只为覆盖 200 行交互成本偏高，而 e2e 已在真实 WebView2 里跑过这些路径；风险已记在本节与 PY11，不是静默略过。
+
+**第 2 轮回执（2026-11-12）**：子代理对上述 10 条逐条回 `已修复`，并顺带指出本记录两处文档不一致（`combo-key` 条数写成 13、PY11 表格缺这一行），已改正。修复后新增单测合计 74 条（33 + 17 + 13 + 11），回归 `logic.test.js` 46 条；重建后 `temp/e2e-pinyin.ps1` 25 项全过（原 21 项 + `↓`/`↑` 移动 2 项 + 「平台框回车后账号仍是张三」2 项）。
+
+### PY11 测试方案
+
+| 层 | 文件 | 覆盖 |
+|---|---|---|
+| 匹配纯函数（假表） | `tests/pinyin.test.js` | 假表 `{小米:[xiao,mi], 华为:[hua,wei], 长城:[chang,zhang,cheng], 乐:[le,yue], 银行:[yin,hang,xing], 小米手机:[xiao,mi,shou,ji]}`：R1–R8 每条至少一个用例；边界（单字、单字母、超长、非 ASCII 查询、空格、大小写）；排序档位与稳定性；表缺失/损坏降级 |
+| 真表 | `tests/pinyin-data.test.js` | `chars.length === count`；全部字符在 U+4E00–U+9FFF；音节只含 `[a-z]`；抽查 `小米`=`xiao/mi`、`长`=`chang/zhang`、`乐` 含 `le` 与 `yue`；源文本 ≤ 200 KB（体积回归） |
+| 表单候选 | `tests/combo-form.test.js` | 候选范围（Q7 决议）、去重、保序、平台没命中时的回落、空库 |
+| 键盘决策 | `tests/combo-key.test.js` | `comboAction` 的决策表：弹层开/关、有无候选、IME 组合期一律不接管、非方向键不接管、入参容错 |
+| Rust | 不新增 | 本需求不改 Rust，一行不动 |
+| 端到端 | `temp/e2e-pinyin.ps1` | 查询页正例 `xm` / `xiaom` / `xiaomi` 命中 `小米`；负例 `xian` 不出现（若库里确有 `小米` 记录）；`Enter` 选中；表单两个下拉各走一次；清单搜索 `xm` 有结果 |
+
+运行方式：`npx vitest run tests/pinyin.test.js tests/pinyin-data.test.js`（阶段二自测）；全量单测在阶段四按约定跑。
+
+### 附：已定决策（Q1–Q9，2026-11-12 确认）
+
+| # | 问题 | 决定 |
+|---|---|---|
+| Q1 | 生效范围 | **C**：查询页两个下拉 + **清单搜索框** + **新增/编辑表单的平台与账号框** |
+| Q2 | 数据来源与覆盖 | **A**：构建期用 pinyin-pro 3.29.5 生成全量 CJK 表（20,856 字，155 KB 源 / 49 KB brotli），包进 `devDependencies` |
+| Q3 | 匹配语义 | **A**：支持混拼 + 尾部未打完 + 允许从任意字开始；排序 字面前缀 > 字面子串 > 拼音开头 > 拼音中间 |
+| Q4 | 多音字 | **A**：全部读音参与（去重后单字最多 5 个） |
+| Q5 | 键盘 | **A**：`↑`/`↓` 移动高亮、`Enter` 选中、鼠标悬停跟随、IME 组合输入期不接管 |
+| Q6 | 候选提示 | **A**：不显示拼音提示，只靠排序 |
+| Q7 | 表单账号候选范围 | **A**：平台精确命中已有平台 → 只列该平台用户名；否则列全部（去重、保序） |
+| Q8 | `Esc` 优先级 | **A**：弹层开着只关弹层并保留输入；再按才关弹窗（关弹窗＝放弃修改，同今天） |
+| Q9 | 表单下拉展开时机 | **A**：聚焦即展开（与查询页一致） |
+
+未决问题：**无**（9 个决策全部闭环）。
+
+### 附：计划自查（对照阶段一六问）
+
+| 审查点 | 结论 |
+|---|---|
+| 需求理解正确 | R1–R13 一一对应 Q1=C 的三个落点；用户原话里的“xm / xiaomi / 没打完”分别落在 R1、R5 |
+| 技术方案合理 | 纯前端 + 静态表；否决了 Rust IPC、内嵌 1 MB 库、手写表三条路 |
+| 修改范围准确 | 新增 5 个进 git 的文件（生成脚本、字表、3 个测试）+ 1 个 `temp/` 端到端脚本；改 8 个（`package.json`+lock、`logic.js`、`index.html`、`app.js`、`styles.css`、`build-preview.mjs`、`README.md`）；Rust 零改动 |
+| 关键场景无遗漏 | 空库、新平台、登录表单自由输入、弹层裁切、IME、Esc 两段、超长查询、表损坏 |
+| 潜在风险 | ① 弹窗内弹层裁切（最主要，已给翻上+限高两条退路）② 字表 155 KB 让 exe 涨约 50 KB ③ 端到端依赖库里存在中文平台，没有则退到预览验证 |
+| 路径符合预期 | 11 步，每步都能单独验证；先表、再纯函数、再 DOM、最后端到端 |
+
+### PY12 实施记录（2026-11-12，阶段二）
+
+| 项 | 结果 |
+|---|---|
+| 字表生成 | `scripts/gen-pinyin-data.mjs` 产出 `frontend/pinyin-data.js`：20,856 字（多音字 2,423）、415 个音节、155.8 KB；`pinyin-pro@3.29.5` 只进 `devDependencies` |
+| 匹配 | `logic.js` 新增 `setPinyinTable` / `getPinyinMap` / `pinyinMatch` / `formAccountOptions`；`matchScore` 扩展出 2（拼音开头）/3（拼音中间）两档，`filterOptions` 签名不变；`filterEntries` 接拼音 |
+| 三处入口 | 查询页两个下拉、清单搜索（`filterEntries`）、新增/编辑表单的平台与账号内联下拉（`setupFormCombo`） |
+| 键盘 | `comboKey(event)` 统一按键语义：`↑`/`↓` 移动、`Enter` 选中、`Esc` 只收弹层；IME 组合输入期不接管；`scrollActiveIntoView` 让高亮不出可视区 |
+| 改动文件 | 新增 `frontend/pinyin-data.js`、`scripts/gen-pinyin-data.mjs`、`tests/pinyin.test.js`、`tests/pinyin-data.test.js`、`tests/combo-form.test.js`；改 `frontend/logic.js`、`app.js`、`index.html`、`styles.css`、`scripts/build-preview.mjs`、`README.md`、`package.json`、`pnpm-lock.yaml` |
+| 单测 | 新增 63 条（33 + 17 + 13）；回归 `logic.test.js` 46 条、`generator.test.js` 28 条全绿 |
+| 端到端 | `temp/e2e-pinyin.ps1` 21 项全过：xm/xiaom/XIAOMI→小米、xa/xian 负例、账号 zs→张三、清单搜索 xm 筛出小米且华为被筛掉、表单 hw→华为/收下拉后回车不选中、表单 xm→小米 且 ls→李四、Esc 两段、`↓` 两步与 `↑` 回绕 |
+| 构建 | `cargo build -p passlet` 通过；`node scripts/build-preview.mjs` 产出预览 1406 KB |
+| 实现期决定 | ① `fitPop(pop, bounds)` 多了 bounds 形参（查询页传 `#app`，表单传弹窗）——计划只写“沿用翻转思路”；② 键盘高亮除底色外加左侧竖条（深色主题下底色太弱）；③ 平台候选顺序沿用 `platformList()` 的现有顺序（实测与插入顺序不同），端到端因此按实际顺序算期望值；④ 读音表把 ü 统一写成 v（`女=nv`） |
+| 未覆盖 | 真实输入法组合输入无法自动化：只做了 `isComposing`/`keyCode 229` 的代码守卫，靠审查而非跑通验证；`pinyin-data.js` 在 exe 里的 brotli 体积未单独测量 |

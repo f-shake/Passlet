@@ -8,6 +8,8 @@ const api = globalThis.PassletApi;
 const {
   filterOptions,
   filterEntries,
+  formAccountOptions,
+  comboAction,
   clampInt,
   maskText,
   normalizeKey,
@@ -286,6 +288,47 @@ const COMBO = {
   user: { root: "#comboUser", input: "#userInput", pop: "#popUser" }
 };
 let openCombo = null;
+// 键盘高亮停在候选列表的第几行。与“当前已选值”（.sel）是两件事：
+// 已选值是状态，高亮只是光标，按 Enter 之前随时可以换。
+const comboActive = { plat: 0, user: 0 };
+
+/**
+ * 下拉的按键语义，查询页与表单共用：↑/↓ 移动、Enter 选中、Esc 只收弹层。
+ * 决策表在 logic.js 的 comboAction 里（可单测），这里只负责把 DOM 状态喂进去。
+ */
+function comboKey(event, open, count) {
+  return comboAction(event.key, {
+    composing: event.isComposing || event.keyCode === 229,
+    open,
+    count
+  });
+}
+
+/** 只改高亮类、不重建列表：hover 与 ↑/↓ 共用它，重建会让鼠标下的节点被换掉。 */
+function markActiveOption(pop, index) {
+  for (const el of pop.querySelectorAll(".opt[data-index]")) {
+    el.classList.toggle("active", Number(el.dataset.index) === index);
+  }
+}
+
+/** 鼠标移到哪一行，高亮就跟到哪一行——否则“鼠标在 A、回车选中 B” */
+function bindOptionHover(pop, onHover) {
+  pop.addEventListener("pointerover", event => {
+    const opt = event.target.closest(".opt[data-index]");
+    if (!opt) return;
+    onHover(Number(opt.dataset.index));
+  });
+}
+
+/** 让高亮行留在可视区内。不用 scrollIntoView：它可能连带滚动整个窗口（查询页只有 214 高）。 */
+function scrollActiveIntoView(pop, index) {
+  const el = pop.querySelector(`.opt[data-index="${index}"]`);
+  if (!el) return;
+  const top = el.offsetTop;
+  const bottom = top + el.offsetHeight;
+  if (top < pop.scrollTop) pop.scrollTop = top;
+  else if (bottom > pop.scrollTop + pop.clientHeight) pop.scrollTop = bottom - pop.clientHeight;
+}
 
 function platformList() {
   const seen = new Set();
@@ -315,12 +358,25 @@ function currentEntry() {
   ) || null;
 }
 
-function setComboOpen(which, open) {
-  openCombo = open ? which : (openCombo === which ? null : openCombo);
+function comboOptionsOf(which) {
+  if (which === "user" && !S.plat) return [];
+  const all = which === "plat" ? platformList() : userList(S.plat);
+  return filterOptions(all, $(COMBO[which].input).value);
+}
+
+function setComboOpen(which) {
+  openCombo = which;
   for (const key of Object.keys(COMBO)) {
     $(COMBO[key].root).classList.toggle("open", openCombo === key);
   }
-  if (open) renderPop(openCombo);
+
+  // 高亮落在“输入框里那个值”上：刚聚焦时它等于已选值，按 Enter 不会误选到别的同前缀项。
+  const options = comboOptionsOf(which);
+  const input = $(COMBO[which].input);
+  const typed = normalizeKey(input.value);
+  const index = typed ? options.findIndex(item => normalizeKey(item) === typed) : -1;
+  comboActive[which] = index > 0 ? index : 0;
+  renderPop(which);
 }
 
 function renderPop(which) {
@@ -331,21 +387,24 @@ function renderPop(which) {
 /**
  * 弹层按可用空间收放。查询页只有 214 高，用户名行的弹层往下放会被窗口切掉，
  * 所以下方放不下就翻到输入框上方，最大高度收到真能放下的量。
+ * bounds 是“看得见的边界”：查询页是整块应用区，表单里是弹窗正文——不能用整个弹窗，
+ * 否则弹层会盖住底部的「保存／取消」，想点按钮先得点两下。
  */
-function fitPop(pop) {
+function fitPop(pop, bounds) {
   const field = pop.parentElement && pop.parentElement.querySelector(".combo-field");
   if (!field) return;
 
   const fieldRect = field.getBoundingClientRect();
-  const appRect = document.getElementById("app").getBoundingClientRect();
+  const boxRect = (bounds || document.getElementById("app")).getBoundingClientRect();
   const margin = 12;
-  const below = appRect.bottom - fieldRect.bottom - margin;
-  const above = fieldRect.top - appRect.top - margin;
+  const below = boxRect.bottom - fieldRect.bottom - margin;
+  const above = fieldRect.top - boxRect.top - margin;
   const wanted = Math.min(150, pop.scrollHeight);
 
   const up = below < wanted && above > below;
   pop.classList.toggle("up", up);
-  pop.style.maxHeight = `${Math.max(56, Math.min(150, up ? above : below))}px`;
+  // 下限取一行的高度（29）：硬留 56 会在空间只剩三十几像素时把弹层顶到边界外面
+  pop.style.maxHeight = `${Math.max(29, Math.min(150, up ? above : below))}px`;
 }
 
 function renderPopContent(which) {
@@ -365,15 +424,20 @@ function renderPopContent(which) {
   const selectedValue = which === "plat" ? S.plat : S.user;
 
   if (!options.length) {
+    comboActive[which] = 0;
     pop.innerHTML = all.length
       ? `<div class="opt none">没有匹配的${which === "plat" ? "平台" : "用户名"}</div>`
       : `<div class="opt none">${which === "plat" ? "还没有密码，点“打开清单”新增" : "这个平台下没有其他用户名"}</div>`;
     return;
   }
 
-  pop.innerHTML = options.map(value => {
+  if (comboActive[which] >= options.length) comboActive[which] = 0;
+
+  pop.innerHTML = options.map((value, index) => {
     const selected = selectedValue && normalizeKey(value) === normalizeKey(selectedValue);
-    return `<div class="opt${selected ? " sel" : ""}" data-value="${esc(value)}">${esc(value)}</div>`;
+    const active = index === comboActive[which];
+    const cls = `opt${selected ? " sel" : ""}${active ? " active" : ""}`;
+    return `<div class="${cls}" data-index="${index}" data-value="${esc(value)}">${esc(value)}</div>`;
   }).join("");
 }
 
@@ -393,6 +457,57 @@ function renderQueryCombos() {
   for (const key of Object.keys(COMBO)) {
     $(COMBO[key].root).classList.toggle("open", openCombo === key);
   }
+}
+
+/**
+ * 查询页两个下拉的键盘处理。弹层没开时，↑/↓ 先把弹层叫出来（和地址栏的联想习惯一致）；
+ * Esc 只收弹层、保留输入，不碰已选值。
+ */
+function comboKeydown(which, event) {
+  const open = openCombo === which;
+  const options = open ? comboOptionsOf(which) : [];
+  const action = comboKey(event, open, options.length);
+  if (!action) return;
+  const input = $(COMBO[which].input);
+
+  if (action === "open") {
+    event.preventDefault();
+    setComboOpen(which);
+    return;
+  }
+
+  if (action === "close") {
+    event.preventDefault();
+    event.stopPropagation();
+    openCombo = null;
+    renderQueryCombos();
+    return;
+  }
+
+  if (action === "next" || action === "prev") {
+    event.preventDefault();
+    const size = options.length;
+    comboActive[which] = (comboActive[which] + (action === "next" ? 1 : -1) + size) % size;
+    markActiveOption($(COMBO[which].pop), comboActive[which]);
+    scrollActiveIntoView($(COMBO[which].pop), comboActive[which]);
+    return;
+  }
+
+  // accept：选中高亮项，再让输入框失焦——失焦处理器会把内容归位成“已选值”。
+  event.preventDefault();
+  const value = options[Math.min(comboActive[which], options.length - 1)];
+  const picked = which === "plat" ? S.plat : S.user;
+  // 选的就是当前那一条：只收弹层。否则 selectPlatform 会把已选用户名清掉，
+  // 用户按 Enter“确认一下”反而丢账号，这和改动前「Enter 什么都不做」差得太远。
+  if (picked && normalizeKey(picked) === normalizeKey(value)) {
+    openCombo = null;
+    renderQueryCombos();
+  } else if (which === "plat") {
+    selectPlatform(value);
+  } else {
+    selectUser(value);
+  }
+  input.blur();
 }
 
 function selectPlatform(value) {
@@ -451,19 +566,26 @@ function startHideTimer() {
 }
 
 // 下拉打开
-$("#platInput").addEventListener("focus", () => setComboOpen("plat", true));
-$("#platInput").addEventListener("input", () => {
-  setComboOpen("plat", true);
-  renderPop("plat");
-});
+$("#platInput").addEventListener("focus", () => setComboOpen("plat"));
+$("#platInput").addEventListener("input", () => setComboOpen("plat"));
+$("#platInput").addEventListener("keydown", event => comboKeydown("plat", event));
 $("#userInput").addEventListener("focus", () => {
-  if (S.plat) setComboOpen("user", true);
+  if (S.plat) setComboOpen("user");
 });
 $("#userInput").addEventListener("input", () => {
   if (!S.plat) return;
-  setComboOpen("user", true);
-  renderPop("user");
+  setComboOpen("user");
 });
+$("#userInput").addEventListener("keydown", event => comboKeydown("user", event));
+
+// 鼠标移到哪一行，高亮就跟到哪一行（与 ↑/↓ 共用同一个下标，回车选中的就是看到的那行）
+for (const key of Object.keys(COMBO)) {
+  bindOptionHover($(COMBO[key].pop), index => {
+    if (openCombo !== key || comboActive[key] === index) return;
+    comboActive[key] = index;
+    markActiveOption($(COMBO[key].pop), index);
+  });
+}
 
 // 选择（用 pointerdown，抢在 blur 之前）
 $("#popPlat").addEventListener("pointerdown", event => {
@@ -485,24 +607,27 @@ $("#popUser").addEventListener("pointerdown", event => {
 $("#platInput").addEventListener("blur", () => {
   const typed = $("#platInput").value;
   const hit = platformList().find(item => normalizeKey(item) === normalizeKey(typed));
-  if (hit) selectPlatform(hit);
-  else {
-    $("#platInput").value = S.plat || "";
-    openCombo = null;
-    renderQueryCombos();
+  // 打的还是当前平台就不重选：重选会把已选用户名清空，等于“确认了一下反丢了账号”
+  if (hit && (!S.plat || normalizeKey(hit) !== normalizeKey(S.plat))) {
+    selectPlatform(hit);
+    return;
   }
+  $("#platInput").value = S.plat || "";
+  openCombo = null;
+  renderQueryCombos();
 });
 $("#userInput").addEventListener("blur", () => {
   const typed = $("#userInput").value;
   const hit = S.plat
     ? userList(S.plat).find(item => normalizeKey(item) === normalizeKey(typed))
     : null;
-  if (hit) selectUser(hit);
-  else {
-    $("#userInput").value = S.user || "";
-    openCombo = null;
-    renderQueryCombos();
+  if (hit && (!S.user || normalizeKey(hit) !== normalizeKey(S.user))) {
+    selectUser(hit);
+    return;
   }
+  $("#userInput").value = S.user || "";
+  openCombo = null;
+  renderQueryCombos();
 });
 
 document.addEventListener("pointerdown", event => {
@@ -749,6 +874,94 @@ function closeModal() {
   if (notify) notify();
 }
 
+/**
+ * 表单里的内联下拉（新增/编辑弹窗）。与查询页共用 comboKey 的按键语义，但状态是本地的：
+ * 选中只回填输入框，不提交表单、不清空别的字段；用户也可以直接敲一个库里没有的新值。
+ */
+function setupFormCombo({ root, input, pop, bounds, getOptions, emptyText }) {
+  let active = 0;
+
+  function isOpen() {
+    return root.classList.contains("open");
+  }
+
+  function close() {
+    root.classList.remove("open");
+  }
+
+  function render() {
+    if (!isOpen()) return;
+    const options = getOptions();
+    if (!options.length) {
+      pop.innerHTML = `<div class="opt none">${emptyText()}</div>`;
+      return;
+    }
+    if (active >= options.length) active = 0;
+    pop.innerHTML = options.map((value, index) => {
+      const cls = `opt${index === active ? " active" : ""}`;
+      return `<div class="${cls}" data-index="${index}" data-value="${esc(value)}">${esc(value)}</div>`;
+    }).join("");
+  }
+
+  function open() {
+    root.classList.add("open");
+    active = 0;
+    render();
+    fitPop(pop, bounds);
+  }
+
+  input.addEventListener("focus", () => {
+    if (!input.disabled) open();
+  });
+  input.addEventListener("input", () => open());
+  input.addEventListener("blur", () => close());
+
+  input.addEventListener("keydown", event => {
+    const options = isOpen() ? getOptions() : [];
+    const action = comboKey(event, isOpen(), options.length);
+    if (!action) return;
+    if (action === "open") {
+      event.preventDefault();
+      open();
+      return;
+    }
+    if (action === "close") {
+      // 只收弹层：这里如果让 Esc 冒泡，整个表单会被关掉，已填内容白填
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+      return;
+    }
+    if (action === "next" || action === "prev") {
+      event.preventDefault();
+      const size = options.length;
+      active = (active + (action === "next" ? 1 : -1) + size) % size;
+      markActiveOption(pop, active);
+      scrollActiveIntoView(pop, active);
+      return;
+    }
+    event.preventDefault();
+    input.value = options[Math.min(active, options.length - 1)];
+    close();
+  });
+
+  // 悬停跟随高亮：与查询页同一套行为
+  bindOptionHover(pop, index => {
+    if (!isOpen() || active === index) return;
+    active = index;
+    markActiveOption(pop, index);
+  });
+
+  pop.addEventListener("pointerdown", event => {
+    const opt = event.target.closest(".opt[data-value]");
+    if (!opt) return;
+    // 用 pointerdown 抢在 blur 之前，否则点下去弹层先消失、选了个寂寞
+    event.preventDefault();
+    input.value = opt.dataset.value;
+    close();
+  });
+}
+
 async function openEntryModal(id) {
   const editing = Boolean(id);
   let secret = "";
@@ -760,14 +973,27 @@ async function openEntryModal(id) {
     secret = S.secrets.has(id) ? S.secrets.get(id) : await api.getSecret(id);
   }
 
+  const chev = '<svg class="chev" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l7 7 7-7"></path></svg>';
   const body = `
     <div class="form-field">
       <label for="fPlat">平台</label>
-      <div class="wrap"><input class="input" id="fPlat" type="text" maxlength="200" autocomplete="off" placeholder="例如 GitHub、阿里云"></div>
+      <div class="combo" id="comboFormPlat">
+        <div class="combo-field input">
+          <input id="fPlat" type="text" maxlength="200" autocomplete="off" placeholder="例如 GitHub、阿里云">
+          ${chev}
+        </div>
+        <div class="combo-pop" id="popFormPlat"></div>
+      </div>
     </div>
     <div class="form-field">
       <label for="fUser">用户名</label>
-      <div class="wrap"><input class="input" id="fUser" type="text" maxlength="200" autocomplete="off" placeholder="账号或邮箱"></div>
+      <div class="combo" id="comboFormUser">
+        <div class="combo-field input">
+          <input id="fUser" type="text" maxlength="200" autocomplete="off" placeholder="账号或邮箱">
+          ${chev}
+        </div>
+        <div class="combo-pop" id="popFormUser"></div>
+      </div>
     </div>
     <div class="form-field">
       <label for="fPwd">密码</label>
@@ -818,6 +1044,28 @@ async function openEntryModal(id) {
   const userInput = modal.body.querySelector("#fUser");
   const pwdInput = modal.body.querySelector("#fPwd");
   const reveal = modal.body.querySelector("#fReveal");
+
+  // 弹层以弹窗正文为边界：`.dlg-body` 自身 overflow-y:auto（窗口被压得很矮时还能滚），
+  // 以它为界既不会被裁，也不会盖住下面的「保存／取消」。
+  const bounds = modal.body;
+
+  setupFormCombo({
+    root: modal.body.querySelector("#comboFormPlat"),
+    input: platInput,
+    pop: modal.body.querySelector("#popFormPlat"),
+    bounds,
+    getOptions: () => filterOptions(platformList(), platInput.value),
+    emptyText: () => (platformList().length ? "没有匹配的平台" : "库里还没有记录")
+  });
+
+  setupFormCombo({
+    root: modal.body.querySelector("#comboFormUser"),
+    input: userInput,
+    pop: modal.body.querySelector("#popFormUser"),
+    bounds,
+    getOptions: () => filterOptions(formAccountOptions(S.entries, platInput.value), userInput.value),
+    emptyText: () => "没有匹配的用户名"
+  });
 
   if (editing) {
     platInput.value = entry.platform;
@@ -1607,7 +1855,7 @@ async function boot() {
   const pick = params.get("pick");
   if (pick) selectPlatform(pick);
   const open = params.get("open");
-  if (open === "plat" || open === "user") setComboOpen(open, true);
+  if (open === "plat" || open === "user") setComboOpen(open);
   if (params.get("reveal") === "1" && !$("#btnEye").disabled) $("#btnEye").click();
 
   const modal = params.get("modal");
