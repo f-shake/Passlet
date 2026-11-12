@@ -38,7 +38,7 @@ const $ = selector => document.querySelector(selector);
 
 const SIZES = {
   error: [462, 272],
-  query: [462, 272],
+  query: [462, 214],
   list: [840, 474],
   settings: [620, 560],
   generator: [462, 380]
@@ -69,6 +69,8 @@ const S = {
   master: null,
   // 换主密码后环境变量没写成功时置位：这一行要一直提醒到下次写入成功
   masterSyncFailed: false,
+  // 从查询页还是清单页进设置/生成视图：返回按钮要回同一边
+  backTo: "list",
   // 生成器插件：每次进视图都重新扫描，改完插件文件不必重启
   generators: [],
   gen: null,
@@ -156,6 +158,11 @@ if (darkQuery) {
    视图切换
    ============================================================ */
 async function showView(view) {
+  // 设置与生成视图有两个入口（查询页 / 清单页），返回时要回到进来那一边
+  if ((view === "settings" || view === "generator") && (S.view === "query" || S.view === "list")) {
+    S.backTo = S.view;
+  }
+
   if (S.view !== view) {
     S.revealed.clear();
     S.rowTimers.forEach(timer => clearTimeout(timer));
@@ -247,6 +254,8 @@ function showError(status) {
   $("#app").dataset.view = "error";
   S.view = "error";
   updateSizeTag();
+  // 错误页比查询页高：窗口按错误页尺寸单独要一次，失败也不影响错误提示本身
+  api.setView("error", null).catch(() => {});
 }
 
 $("#errCopy").addEventListener("click", async () => {
@@ -315,6 +324,31 @@ function setComboOpen(which, open) {
 }
 
 function renderPop(which) {
+  renderPopContent(which);
+  if (which) fitPop($(COMBO[which].pop));
+}
+
+/**
+ * 弹层按可用空间收放。查询页只有 214 高，用户名行的弹层往下放会被窗口切掉，
+ * 所以下方放不下就翻到输入框上方，最大高度收到真能放下的量。
+ */
+function fitPop(pop) {
+  const field = pop.parentElement && pop.parentElement.querySelector(".combo-field");
+  if (!field) return;
+
+  const fieldRect = field.getBoundingClientRect();
+  const appRect = document.getElementById("app").getBoundingClientRect();
+  const margin = 12;
+  const below = appRect.bottom - fieldRect.bottom - margin;
+  const above = fieldRect.top - appRect.top - margin;
+  const wanted = Math.min(150, pop.scrollHeight);
+
+  const up = below < wanted && above > below;
+  pop.classList.toggle("up", up);
+  pop.style.maxHeight = `${Math.max(56, Math.min(150, up ? above : below))}px`;
+}
+
+function renderPopContent(which) {
   if (!which) return;
   const conf = COMBO[which];
   const input = $(conf.input);
@@ -634,7 +668,9 @@ $("#btnAdd").addEventListener("click", () => guard(() => openEntryModal(null)));
 
 $("#btnBackFromList").addEventListener("click", () => guard(() => showView("query")));
 $("#btnSettings").addEventListener("click", () => guard(() => showView("settings")));
-$("#btnBackFromSettings").addEventListener("click", () => guard(() => showView("list")));
+$("#btnQuerySettings").addEventListener("click", () => guard(() => showView("settings")));
+$("#btnQueryGenerator").addEventListener("click", () => guard(() => showView("generator")));
+$("#btnBackFromSettings").addEventListener("click", () => guard(() => showView(S.backTo || "list")));
 
 async function refreshEntries() {
   const list = await guard(() => api.listEntries());
@@ -1483,7 +1519,7 @@ $("#btnGenerator").addEventListener("click", () =>
 
 $("#btnBackFromGenerator").addEventListener("click", () =>
   guard(async () => {
-    await showView("list");
+    await showView(S.backTo || "list");
   })
 );
 

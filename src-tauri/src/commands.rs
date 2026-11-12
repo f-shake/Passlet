@@ -400,6 +400,8 @@ pub fn set_view(window: tauri::WebviewWindow, view: String, height: Option<u32>)
         "list" => config.window_sizes.list,
         "settings" => config.window_sizes.settings,
         "generator" => config.window_sizes.generator,
+        // 错误页内容比查询页高，不能跟着查询页一起收小
+        "error" => config::DEFAULT_ERROR,
         _ => config.window_sizes.query,
     };
 

@@ -7,10 +7,14 @@ use crate::error::AppResult;
 use crate::paths;
 
 pub const CONFIG_NAME: &str = "config.json";
-pub const DEFAULT_QUERY: [u32; 2] = [462, 272];
+pub const DEFAULT_QUERY: [u32; 2] = [462, 214];
+/// 上一版的查询页默认高度。内容只占约 203，272 会让“打开清单”上方空出 70px。
+const LEGACY_QUERY: [u32; 2] = [462, 272];
 pub const DEFAULT_LIST: [u32; 2] = [840, 474];
 pub const DEFAULT_SETTINGS: [u32; 2] = [620, 560];
 pub const DEFAULT_GENERATOR: [u32; 2] = [462, 380];
+/// 错误页：内容比查询页高，尺寸不跟随查询页
+pub const DEFAULT_ERROR: [u32; 2] = [462, 272];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -107,7 +111,16 @@ pub fn load_in(dir: &std::path::Path) -> Config {
         Err(_) => return Config::default(),
     };
     match serde_json::from_str::<Config>(&raw) {
-        Ok(config) => config.sanitized(),
+        // 老版本写出的配置里一定没有 windowSizes.generator；只有那种文件才做一次
+        // “旧默认高度 → 新默认高度”的升级，新版本写出的 272 视为用户自己的选择。
+        Ok(config) => {
+            let legacy_file = !raw.contains("\"generator\"");
+            let mut config = config;
+            if legacy_file && config.window_sizes.query == LEGACY_QUERY {
+                config.window_sizes.query = DEFAULT_QUERY;
+            }
+            config.sanitized()
+        }
         Err(_) => {
             let fallback = Config::default();
             let _ = save_in(dir, &fallback);
@@ -153,7 +166,7 @@ mod tests {
         assert_eq!(config.theme, "system");
         assert_eq!(config.clipboard_clear_seconds, 30);
         assert_eq!(config.hide_password_seconds, 30);
-        assert_eq!(config.window_sizes.query, [462, 272]);
+        assert_eq!(config.window_sizes.query, [462, 214]);
         assert_eq!(config.window_sizes.list, [840, 474]);
         assert_eq!(config.window_sizes.settings, [620, 560]);
         assert_eq!(config.window_sizes.generator, [462, 380]);
@@ -175,6 +188,29 @@ mod tests {
         assert_eq!(loaded.theme, "dark");
         assert_eq!(loaded.clipboard_clear_enabled, false);
         assert_eq!(loaded.clipboard_clear_seconds, 5);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 旧查询页默认高度只对上一版写出的配置升级() {
+        let dir = temp_dir("legacy-query");
+
+        // 上一版写出的配置（没有 generator 字段）：272 是旧默认值，升级成 214
+        fs::write(
+            dir.join("config.json"),
+            r#"{"version":1,"theme":"system","clipboardClearEnabled":true,"clipboardClearSeconds":30,"hidePasswordSeconds":30,"windowSizes":{"query":[462,272],"list":[840,474],"settings":[620,560]}}"#,
+        )
+        .unwrap();
+        assert_eq!(load_in(&dir).window_sizes.query, DEFAULT_QUERY);
+
+        // 新版本写出的配置（有 generator 字段）：272 是用户自己的选择，不动
+        fs::write(
+            dir.join("config.json"),
+            r#"{"version":1,"theme":"system","clipboardClearEnabled":true,"clipboardClearSeconds":30,"hidePasswordSeconds":30,"windowSizes":{"query":[462,272],"list":[840,474],"settings":[620,560],"generator":[462,380]}}"#,
+        )
+        .unwrap();
+        assert_eq!(load_in(&dir).window_sizes.query, [462, 272]);
 
         fs::remove_dir_all(&dir).ok();
     }

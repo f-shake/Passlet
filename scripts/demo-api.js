@@ -21,7 +21,7 @@
     clipboardClearSeconds: 30,
     hidePasswordSeconds: 30,
     rememberWindowSize: true,
-    windowSizes: { query: [462, 272], list: [840, 474], settings: [620, 560] }
+    windowSizes: { query: [462, 214], list: [840, 474], settings: [620, 560] }
   };
 
   let nextId = 100;
