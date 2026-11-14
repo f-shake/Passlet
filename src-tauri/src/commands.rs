@@ -387,6 +387,19 @@ pub fn save_config(config: Config) -> AppResult<Config> {
     config::save(&config)
 }
 
+/// 让主窗口出现。窗口在配置里是隐藏创建的：前端先把主题应用到页面上，再调这里。
+/// 反过来（先显示、后应用主题）就是冷启动闪一下白底——主题是用户设置的一部分，
+/// 得等 `getConfig` 回来才知道深浅，而窗口一出现用户就看见了。
+#[tauri::command]
+pub fn show_window(window: tauri::WebviewWindow) -> AppResult<()> {
+    window
+        .show()
+        .map_err(|err| AppError::new("io", format!("无法显示窗口：{err}")))?;
+    // 隐藏期间点过别的窗口，显示后不主动抢焦点的话窗口是"前台但没焦点"的状态
+    let _ = window.set_focus();
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultLocation {

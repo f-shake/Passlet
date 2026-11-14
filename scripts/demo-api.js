@@ -87,6 +87,11 @@
 
     async lock() {},
 
+    // 预览里窗口早就看得见，没有"等主题就绪再显示"这件事
+    async show_window() {
+      return null;
+    },
+
     async set_view() {},
 
     async apply_theme() {},

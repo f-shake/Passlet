@@ -149,6 +149,9 @@ function applyTheme() {
   // daisyUI 靠 html 上的 data-theme 切主题，所以这里只改属性，不碰任何样式规则
   const mode = themeMode();
   document.documentElement.dataset.theme = resolvedTheme(mode);
+  // “主题已经按配置落好了”的标记：窗口要等它出现才显示（见 revealWindow）。
+  // data-theme 本身不能当信号——index.html 里就带着初始值，一直是有的。
+  document.documentElement.dataset.themeReady = "1";
   // 原生标题栏不归 CSS 管，得让 Rust 侧同步一次（预览环境没有这个命令，忽略失败）
   if (api.setWindowTheme) api.setWindowTheme(mode).catch(() => {});
 }
@@ -2067,6 +2070,49 @@ $("#btnCopyGenDir").addEventListener("click", () =>
 /* ============================================================
    启动
    ============================================================ */
+
+/**
+ * 让窗口出现。窗口在 tauri.conf.json 里是隐藏创建的，所以这一步必须有人做，
+ * 否则程序"启动了但看不见"。
+ *
+ * 两个约束：
+ * 1. **只在主题真的落到页面上之后才显示**——`applyTheme()` 会打 `data-theme-ready` 标记，
+ *    等不到它就不 show，否则窗口一出场就是 index.html 里那个初始浅色。
+ * 2. **不能只押在 rAF 上**：窗口隐藏时浏览器可能暂停帧回调，所以另挂一个 setTimeout
+ *    抢答；谁先到谁负责显示，靠 `shown` 保证只执行一次。后端还有 5 秒兜底。
+ */
+function revealWindow() {
+  let shown = false;
+  const show = () => {
+    if (shown) return;
+    shown = true;
+    api.showWindow().catch(err => {
+      // 静默失败会让人以为“程序卡住了”，至少在控制台留一条
+      console.warn("显示窗口失败：", err);
+    });
+  };
+
+  let frames = 0;
+  const whenThemed = () => {
+    if (shown) return;
+    if (document.documentElement.dataset.themeReady === "1" || frames >= 12) {
+      show();
+      return;
+    }
+    frames += 1;
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(whenThemed);
+    else setTimeout(whenThemed, 16);
+  };
+
+  if (typeof requestAnimationFrame === "function") {
+    // 双帧是为了让第一帧的样式真正画出来；300ms 的定时器是给“帧回调被挂起”留的退路
+    requestAnimationFrame(() => requestAnimationFrame(whenThemed));
+    setTimeout(whenThemed, 300);
+  } else {
+    setTimeout(whenThemed, 16);
+  }
+}
+
 async function afterUnlocked() {
   S.config = await api.getConfig();
   renderSettings();
@@ -2087,7 +2133,15 @@ async function boot() {
     if (forcedTheme === "light" || forcedTheme === "dark") S.themeOverride = forcedTheme;
   }
 
+  // 顺序：先把配置读进来（本地小文件，几毫秒）→ 应用主题 → 再让窗口出现。
+  // 反过来就是冷启动闪白底：窗口先出来，主题要等 bootstrap 之后才到。
+  try {
+    S.config = await api.getConfig();
+  } catch {
+    S.config = null;
+  }
   applyTheme();
+  revealWindow();
 
   const status = await api.bootstrap();
 
@@ -2096,8 +2150,6 @@ async function boot() {
     return;
   }
 
-  S.config = await api.getConfig();
-  applyTheme();
   renderSettings();
   await refreshVaultLocation();
   await refreshEntries();

@@ -46,6 +46,8 @@
 *{box-sizing:border-box;}
 
 html,body{height:100%;margin:0;}
+/* 根元素也要有底色：窗口隐藏到显示之间、以及内容未铺满时，露出来的是画布本身 */
+html{background:var(--color-base-100);}
 
 body{
   background:var(--color-base-100);

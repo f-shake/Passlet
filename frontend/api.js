@@ -32,6 +32,9 @@
 
   const lock = () => call("lock");
 
+  // 窗口是隐藏创建的：主题应用完之后调这个，让它带着正确配色出现
+  const showWindow = () => call("show_window");
+
   // height：生成视图按内容量出来的高度；其它视图传 null，用 config 里记住的尺寸
   const setView = (view, height) =>
     call("set_view", { view, height: height == null ? null : height });
@@ -115,6 +118,7 @@
     error,
     bootstrap,
     lock,
+    showWindow,
     setView,
     setWindowTheme,
     listEntries,
