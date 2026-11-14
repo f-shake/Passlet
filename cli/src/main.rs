@@ -105,6 +105,8 @@ fn exit_code(code: &str) -> i32 {
         "env_missing" | "decrypt_failed" => 2,
         "not_found" => 3,
         "duplicate" => 4,
+        // 位置指向的目录里没有库：既不是用法问题，也不是密码问题，单列一个码
+        "vault_missing" => 6,
         _ => 5,
     }
 }
@@ -116,12 +118,36 @@ fn data_dir(cli: &Cli) -> AppResult<PathBuf> {
                 .map_err(|err| AppError::new("io", format!("无法创建 {}：{err}", dir.display())))?;
             Ok(dir.clone())
         }
-        None => storage::data_dir(),
+        // 不带 --vault 时跟着图形界面设的位置走：同一台机上两个入口必须是同一个库，
+        // 否则 doctor 报的目录和条目数会跟界面对不上，排障时反而误导人。
+        None => passlet_core::location::ensure_vault_dir(),
     }
+}
+
+/// 跟随配置的目录里没有库时直接报错，不要当成“首次运行”。
+///
+/// 少了这一层，`list` 会安静地输出空、`add` 会在那个目录里新建一个 0 条目的库，
+/// 随后还可能被同步工具盖到真库上——图形界面里 R10 挡的就是这件事，两个入口必须一致。
+/// 显式给了 `--vault` 就不拦：那是有意指定一个新位置，首次运行是正常用法。
+fn guard_location(cli: &Cli, dir: &Path) -> AppResult<()> {
+    if cli.vault.is_some() {
+        return Ok(());
+    }
+    if passlet_core::location::has_vault(dir) || passlet_core::location::is_default(dir) {
+        return Ok(());
+    }
+    Err(AppError::new(
+        "vault_missing",
+        format!(
+            "找不到密码库：{}。这个位置可能还没同步下来，或者目录被改名了。",
+            dir.join(passlet_core::VAULT_NAME).display()
+        ),
+    ))
 }
 
 fn run(cli: &Cli) -> AppResult<()> {
     let dir = data_dir(cli)?;
+    guard_location(cli, &dir)?;
 
     match &cli.command {
         Command::Doctor => doctor(&dir, cli.json),

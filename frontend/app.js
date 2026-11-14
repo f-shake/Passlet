@@ -6,6 +6,9 @@ if (!("__TAURI_INTERNALS__" in window)) document.documentElement.classList.add("
 // 与 logic.js、api.js 一样用经典脚本（无 import/export），这样 file:// 双击打开也能跑。
 const api = globalThis.PassletApi;
 const {
+  dirLabel,
+  showRestoreDefault,
+  switchToast,
   filterOptions,
   filterEntries,
   formAccountOptions,
@@ -67,7 +70,10 @@ const S = {
   revealed: new Set(),
   rowTimers: new Map(),
   pwdTimer: null,
-  vaultPathText: "",
+  // 库文件放在哪：{ dir, file, isDefault, defaultDir }
+  vaultLocation: null,
+  // 最近一次启动失败的状态（错误页要用后端给的完整提示）
+  lastStatus: null,
   master: null,
   // 换主密码后环境变量没写成功时置位：这一行要一直提醒到下次写入成功
   masterSyncFailed: false,
@@ -237,6 +243,12 @@ function showError(status) {
       title: "数据文件版本比程序新",
       text: "请升级 Passlet 后再打开这个数据文件。",
       cmd: ""
+    },
+    // 位置对不上（配置指向的目录里没有库）：正文要带上具体路径，所以这里只占位
+    vault_missing: {
+      title: "找不到密码库",
+      text: "这个位置里没有 vault.dat。",
+      cmd: ""
     }
   };
   const info = map[status && status.reason] || map.decrypt_failed;
@@ -253,6 +265,16 @@ function showError(status) {
   // 文件损坏 / 版本太新这两类改环境变量没用，别给错误的出路
   const canFix = status && (status.reason === "env_missing" || status.reason === "decrypt_failed");
   $("#errSetMaster").hidden = !canFix;
+
+  // 三种“位置不对”的出路只在缺库时出现：
+  // 改回默认 / 去别处选一个 / 就在这里新建空库（空库必须由用户点按钮，绝不自动建）
+  const missing = Boolean(status) && status.reason === "vault_missing";
+  $("#errResetDir").hidden = !missing;
+  $("#errPickDir").hidden = !missing;
+  $("#errNewVault").hidden = !missing;
+  S.lastStatus = status || null;
+  if (missing) showMissingDetail();
+
   $("#app").dataset.view = "error";
   S.view = "error";
   updateSizeTag();
@@ -277,6 +299,100 @@ $("#errRetry").addEventListener("click", () =>
     await afterUnlocked();
   })
 );
+
+/** 缺库时把真实路径填进正文：只说“找不到”而说不出在哪找，等于没说。 */
+async function showMissingDetail() {
+  $("#errText").textContent = "正在读取数据位置…";
+  const loc = await refreshVaultLocation();
+  // 第一句用后端给的原文（它带着具体路径），避免同一段文案在 Rust 与 JS 各存一份
+  const head = (S.lastStatus && S.lastStatus.message) || (loc ? `找不到密码库：${loc.file}。` : "");
+  if (!head) {
+    $("#errText").textContent = "读取数据位置失败。";
+    return;
+  }
+  $("#errText").textContent =
+    head + "可以点下面的按钮换一个位置，或把库放回原处后点“重新读取”。";
+}
+
+/** 位置改好之后重新解锁并回到正常界面。 */
+async function retryAfterDirChange() {
+  const status = await api.bootstrap();
+  if (!status.masterLoaded) {
+    showError(status);
+    return;
+  }
+  await afterUnlocked();
+}
+
+$("#errResetDir").addEventListener("click", event =>
+  guard(async () => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const loc = S.vaultLocation || (await api.vaultLocation());
+      // 走和设置页同一条流程（要不要确认由后端判定），而不是硬塞 confirm：
+      // 缺库状态下这是一次“把指针指回去”，有库可搬时它仍需确认
+      await applyDirSwitch(loc.defaultDir, "move", { reload: false });
+      await retryAfterDirChange();
+    } finally {
+      button.disabled = false;
+    }
+  })
+);
+
+$("#errPickDir").addEventListener("click", event =>
+  guard(async () => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const dir = await api.pickVaultDir();
+      if (!dir) return;
+      await applyDirSwitch(dir, "auto", { reload: false });
+      await retryAfterDirChange();
+    } finally {
+      button.disabled = false;
+    }
+  })
+);
+
+$("#errNewVault").addEventListener("click", event =>
+  guard(async () => {
+    const button = event.currentTarget;
+    const loc = (await refreshVaultLocation()) || null;
+    if (!(await confirmNewVault(loc))) return;
+    button.disabled = true;
+    try {
+      await api.createVaultHere();
+      await retryAfterDirChange();
+    } finally {
+      button.disabled = false;
+    }
+  })
+);
+
+/** 建空库前的确认。它是唯一能在“非首次运行”状态下创建库文件的入口，所以要问。 */
+function confirmNewVault(loc) {
+  return new Promise(resolve => {
+    openModal({
+      title: "在这里新建空库",
+      body: `
+        <p>将在 ${esc(loc ? loc.file : "当前数据位置")} 用当前主密码新建一个空的密码库。</p>
+        <p>如果这个位置本来有一份库、只是还没同步下来，在这里新建会让两份出现在同一个位置。</p>`,
+      buttons: [
+        { label: "取消", onClick: close => close() },
+        {
+          label: "新建",
+          primary: true,
+          onClick: close => {
+            resolve(true);
+            close();
+          }
+        }
+      ],
+      onClose: () => resolve(false)
+    });
+  });
+}
 
 $("#errSetMaster").addEventListener("click", () => guard(() => openMasterModal()));
 
@@ -1127,19 +1243,132 @@ function renderSettings() {
   $("#numHideSeconds").value = S.config.hidePasswordSeconds;
   updateSizeTag();
   refreshMasterState();
+  renderDataLocation();
+  refreshVaultLocation();
+}
 
-  // 数据文件路径只在第一次进设置页时取，之后复用
-  if (!S.vaultPathText) {
-    api.vaultPath().then(path => {
-      S.vaultPathText = path;
-      $("#pathText").textContent = path;
-      $("#pathText").title = path;
-    }).catch(() => {
-      $("#pathText").textContent = "读取失败";
-    });
-  } else {
-    $("#pathText").textContent = S.vaultPathText;
+/* ---------- 数据位置 ---------- */
+
+function renderDataLocation() {
+  const loc = S.vaultLocation;
+  const path = $("#pathText");
+  if (!loc) {
+    // 还没拿到就显示占位符，别让上一台机器的路径留在界面上
+    path.textContent = "—";
+    path.title = "";
+    $("#btnRestoreDir").hidden = true;
+    return;
   }
+  path.textContent = dirLabel(loc.file, 46);
+  path.title = loc.file;
+  $("#btnRestoreDir").hidden = !showRestoreDefault(loc.isDefault);
+}
+
+async function refreshVaultLocation() {
+  try {
+    S.vaultLocation = await api.vaultLocation();
+  } catch {
+    S.vaultLocation = null;
+  }
+  renderDataLocation();
+  return S.vaultLocation;
+}
+
+/**
+ * 换库位置的完整流程：先问后端“这是连接还是迁移”，迁移再要一次确认。
+ * 只有用户点了「继续」才带 confirm 再发一次请求——后端在没拿到 confirm 之前不碰任何文件。
+ *
+ * `options.reload === false`：调用方在错误页，会话还没有，别去刷条目列表。
+ */
+async function applyDirSwitch(dir, mode, options) {
+  let report = await api.switchVaultDir(dir, mode);
+  if (report.kind === "needs_confirm") {
+    if (!(await confirmMove(report))) return null;
+    report = await api.switchVaultDir(dir, mode, true);
+  }
+  await afterDirSwitch(report, options);
+  return report;
+}
+
+/** 迁移前的确认框。返回 true = 用户点了「继续」。 */
+function confirmMove(report) {
+  return new Promise(resolve => {
+    const current = (S.vaultLocation && S.vaultLocation.file) || "—";
+    openModal({
+      title: "把密码库换个位置？",
+      body: `
+        <div class="kv"><span>当前位置</span><code>${esc(current)}</code></div>
+        <div class="kv"><span>新位置</span><code>${esc(report.file)}</code></div>
+        <div class="kv"><span>条目数量</span><code>${Number(report.entries) || 0} 条</code></div>
+        <p>只搬 vault.dat 这一个文件；原位置的文件会改名成 vault.dat.moved-时间戳 留着。</p>`,
+      buttons: [
+        { label: "取消", onClick: close => close() },
+        {
+          label: "继续",
+          primary: true,
+          onClick: close => {
+            // 先定型再关闭：close() 会触发 onClose 的 resolve(false)
+            resolve(true);
+            close();
+          }
+        }
+      ],
+      onClose: () => resolve(false)
+    });
+  });
+}
+
+/** 迁移成功后的回执：新位置和留档文件都得写全，toast 两秒记不住这么长的路径。 */
+function showMoveReport(report) {
+  // 没有留档就不许提留档：源文件改名失败时只有 warning，源目录本来没库时两者都没有
+  const retired = report.retired
+    ? `<div class="kv"><span>原位置留档</span><code>${esc(report.retired)}</code></div>
+       <p>原位置的那份已改名保留，确认不再需要时可以手动删除。</p>`
+    : "";
+  openModal({
+    title: "数据位置已更改",
+    body: `
+      <div class="kv"><span>新位置</span><code>${esc(report.file)}</code></div>
+      <div class="kv"><span>条目数量</span><code>${Number(report.entries) || 0} 条</code></div>
+      ${retired}
+      ${report.warning ? `<p>${esc(report.warning)}</p>` : ""}`,
+    buttons: [{ label: "确定", primary: true, onClick: close => close() }]
+  });
+}
+
+async function afterDirSwitch(report, options) {
+  const opts = options || {};
+  const message = switchToast(report);
+  if (message) toast(message);
+
+  // 配置里的 vaultDir 也变了：不重取的话，下一次改主题/剪贴板就会把旧指针整份写回去，
+  // 库的位置在那里悄悄被改回上一个目录。
+  S.config = await api.getConfig();
+  await refreshVaultLocation();
+
+  if (report.kind === "cleared") {
+    // 没有库可搬，只改了指针：默认目录空的话，接下来会以“首次运行”的空库进入查询页。
+    // 这一点必须当面说清，否则看起来像数据被清空了。
+    const loc = S.vaultLocation;
+    toast(
+      loc && loc.isDefault
+        ? "已改回默认位置；那里还没有密码库，会以空库开始。"
+        : "已把数据位置改到该目录。"
+    );
+  }
+
+  if (opts.reload === false) return;
+
+  S.secrets.clear();
+  S.revealed.clear();
+  S.plat = null;
+  S.user = null;
+  S.filter = "";
+  await refreshEntries();
+  renderQueryCombos();
+  renderList();
+
+  if (report.kind === "moved") showMoveReport(report);
 }
 
 async function patchConfig(patch) {
@@ -1173,9 +1402,39 @@ $("#numHideSeconds").addEventListener("change", event =>
 
 $("#btnCopyPath").addEventListener("click", () =>
   guard(async () => {
-    const path = await api.vaultPath();
-    await api.copyText(path);
+    const loc = S.vaultLocation || (await api.vaultLocation());
+    await api.copyText(loc.file);
     toast("路径已复制");
+  })
+);
+
+$("#btnPickDir").addEventListener("click", event =>
+  guard(async () => {
+    // 必须在第一个 await 之前取：事件派发结束后 currentTarget 会被置空
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const dir = await api.pickVaultDir();
+      if (!dir) return; // 用户取消
+      await applyDirSwitch(dir, "auto");
+    } finally {
+      button.disabled = false;
+    }
+  })
+);
+
+// 默认位置有旧库也强制搬回去：这里的语义是“数据跟着指针走”，
+// 不是“打开默认目录里原有的那份”——两份数据混在一起最容易被误解。
+$("#btnRestoreDir").addEventListener("click", event =>
+  guard(async () => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const loc = S.vaultLocation || (await api.vaultLocation());
+      await applyDirSwitch(loc.defaultDir, "move");
+    } finally {
+      button.disabled = false;
+    }
   })
 );
 
@@ -1812,6 +2071,7 @@ async function afterUnlocked() {
   S.config = await api.getConfig();
   renderSettings();
   applyTheme();
+  await refreshVaultLocation();
   await refreshEntries();
   await showView("query");
 }
@@ -1839,6 +2099,7 @@ async function boot() {
   S.config = await api.getConfig();
   applyTheme();
   renderSettings();
+  await refreshVaultLocation();
   await refreshEntries();
 
   if (!demoMode) {

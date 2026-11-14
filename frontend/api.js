@@ -27,7 +27,7 @@
 
   /* ---------- 会话 ---------- */
 
-  // { masterLoaded: boolean, reason?: "env_missing" | "decrypt_failed" | "corrupt" | "version" }
+  // { masterLoaded: boolean, reason?: "env_missing" | "decrypt_failed" | "corrupt" | "version" | "vault_missing", message?: string }
   const bootstrap = () => call("bootstrap");
 
   const lock = () => call("lock");
@@ -64,7 +64,19 @@
 
   const saveConfig = config => call("save_config", { config });
 
-  const vaultPath = () => call("vault_path_display");
+  // 当前库位置：{ dir, file, isDefault, defaultDir }
+  const vaultLocation = () => call("vault_location");
+
+  // 弹系统文件夹选择框，取消时返回 null
+  const pickVaultDir = () => call("pick_vault_dir");
+
+  // mode: "auto"（目标有库就连接，没库就迁移）| "move"（即使目标有库也强制迁移）
+  // confirm: 迁移前用户已经确认过；不传时后端只回执 { kind: "needs_confirm" }，不动文件
+  const switchVaultDir = (dir, mode, confirm) =>
+    call("switch_vault_dir", { dir, mode, confirm });
+
+  // 在当前指针位置新建一个空库（只给“找不到密码库”的错误页用）
+  const createVaultHere = () => call("create_vault_here");
 
   // 返回 { active, processEnv, userRegistry, machineRegistry, vaultExists }
   const masterStatus = () => call("master_status");
@@ -114,7 +126,10 @@
     deleteEntry,
     getConfig,
     saveConfig,
-    vaultPath,
+    vaultLocation,
+    pickVaultDir,
+    switchVaultDir,
+    createVaultHere,
     masterStatus,
     setMasterEnv,
     clearMasterEnv,

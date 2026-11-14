@@ -53,6 +53,11 @@ pub struct Config {
     pub clipboard_clear_seconds: u32,
     pub hide_password_seconds: u32,
     pub window_sizes: WindowSizes,
+    /// 库文件所在目录（绝对路径）。`None` = 默认目录 `%APPDATA%\Passlet`。
+    ///
+    /// 只放库，不放配置：`config.json` 自己就住在这里面，所以它不能跟着库搬走。
+    #[serde(default)]
+    pub vault_dir: Option<String>,
 }
 
 impl Default for Config {
@@ -64,6 +69,7 @@ impl Default for Config {
             clipboard_clear_seconds: 30,
             hide_password_seconds: 30,
             window_sizes: WindowSizes::default(),
+            vault_dir: None,
         }
     }
 }
@@ -97,9 +103,31 @@ impl Config {
         self.window_sizes.list = clamp_size(self.window_sizes.list, DEFAULT_LIST);
         self.window_sizes.settings = clamp_size(self.window_sizes.settings, DEFAULT_SETTINGS);
         self.window_sizes.generator = clamp_size(self.window_sizes.generator, DEFAULT_GENERATOR);
+        self.vault_dir = self.vault_dir.as_deref().and_then(normalize_vault_dir);
         self.version = 1;
         self
     }
+}
+
+/// 库目录的净化：空串、相对路径、等于默认目录的路径都归成 `None`。
+///
+/// 归成 `None` 而不是保留原值，是为了让“去默认目录”只有一种表示——
+/// 否则界面上「恢复默认位置」的显隐、以及“这算不算自定义位置”的判断都得处理两种写法。
+fn normalize_vault_dir(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = std::path::Path::new(trimmed);
+    if !path.is_absolute() {
+        return None;
+    }
+    if let Ok(default) = paths::default_vault_dir() {
+        if paths::same_dir(path, &default) {
+            return None;
+        }
+    }
+    Some(trimmed.to_string())
 }
 
 /// 读配置。文件不存在或内容坏了都回落默认值；
@@ -283,6 +311,67 @@ mod tests {
 
         let text = fs::read_to_string(dir.join("config.json")).unwrap();
         assert!(serde_json::from_str::<Config>(&text).is_ok());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 老配置没有_vault_dir_字段时按默认目录() {
+        // 老版本写出的配置里一定没有 vaultDir：不能因为它缺失就整份回落默认
+        let dir = temp_dir("legacy-vault-dir");
+        fs::write(
+            dir.join("config.json"),
+            r#"{"version":1,"theme":"dark","clipboardClearEnabled":true,"clipboardClearSeconds":30,"hidePasswordSeconds":30,"windowSizes":{"query":[462,214],"list":[840,474],"settings":[620,560],"generator":[462,380]}}"#,
+        )
+        .unwrap();
+
+        let loaded = load_in(&dir);
+        assert_eq!(loaded.vault_dir, None);
+        assert_eq!(loaded.theme, "dark");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 库目录为相对路径或空串时归一成_none() {
+        for bad in ["", "   ", "Passlet", r"..\Passlet"] {
+            let mut config = Config::default();
+            config.vault_dir = Some(bad.to_string());
+            assert_eq!(config.sanitized().vault_dir, None, "应当归一：{bad:?}");
+        }
+    }
+
+    #[test]
+    fn 库目录等于默认目录时归一成_none() {
+        let Ok(default) = paths::default_vault_dir() else {
+            return; // 拿不到用户目录的环境里跳过
+        };
+        let mut config = Config::default();
+        config.vault_dir = Some(default.display().to_string());
+        assert_eq!(config.sanitized().vault_dir, None);
+
+        // 大小写与末尾分隔符不同也算同一个目录
+        let mut trailing = Config::default();
+        trailing.vault_dir = Some(format!("{}\\", default.display()));
+        assert_eq!(trailing.sanitized().vault_dir, None);
+    }
+
+    #[test]
+    fn 自定义库目录原样保留() {
+        let mut config = Config::default();
+        config.vault_dir = Some(r"C:\Users\autod\OneDrive\Passlet".to_string());
+        assert_eq!(
+            config.sanitized().vault_dir.as_deref(),
+            Some(r"C:\Users\autod\OneDrive\Passlet")
+        );
+    }
+
+    #[test]
+    fn 库目录能存进配置再读回() {
+        let dir = temp_dir("vault-dir-roundtrip");
+        let mut config = Config::default();
+        config.vault_dir = Some(r"D:\同步\Passlet".to_string());
+        save_in(&dir, &config).unwrap();
+
+        assert_eq!(load_in(&dir).vault_dir.as_deref(), Some(r"D:\同步\Passlet"));
         fs::remove_dir_all(&dir).ok();
     }
 }

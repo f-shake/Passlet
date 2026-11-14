@@ -190,8 +190,29 @@
       return JSON.parse(JSON.stringify(config));
     },
 
-    async vault_path_display() {
-      return "C:\\Users\\autod\\AppData\\Roaming\\Passlet\\vault.dat";
+    // 预览里固定演示“库放在默认目录”的状态
+    async vault_location() {
+      return {
+        dir: "C:\\Users\\autod\\AppData\\Roaming\\Passlet",
+        file: "C:\\Users\\autod\\AppData\\Roaming\\Passlet\\vault.dat",
+        isDefault: true,
+        defaultDir: "C:\\Users\\autod\\AppData\\Roaming\\Passlet"
+      };
+    },
+
+    async pick_vault_dir() {
+      await sleep(120);
+      throw { code: "no_host", message: "预览页没有系统文件对话框。" };
+    },
+
+    async switch_vault_dir() {
+      await sleep(120);
+      throw { code: "no_host", message: "预览页不能真的换数据位置。" };
+    },
+
+    async create_vault_here() {
+      await sleep(120);
+      throw { code: "no_host", message: "预览页不能真的新建密码库。" };
     },
 
     async master_status() {

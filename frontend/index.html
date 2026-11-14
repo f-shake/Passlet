@@ -26,6 +26,9 @@
       <div class="err-actions">
         <button class="btn btn-sm" id="errCopy" hidden>复制命令</button>
         <button class="btn btn-sm btn-primary" id="errSetMaster" hidden>在这里设置主密码</button>
+        <button class="btn btn-sm" id="errResetDir" hidden>改回默认位置</button>
+        <button class="btn btn-sm" id="errPickDir" hidden>选择数据目录…</button>
+        <button class="btn btn-sm" id="errNewVault" hidden>在这里新建空库</button>
         <button class="btn btn-sm" id="errRetry">重新读取</button>
       </div>
     </div>
@@ -199,6 +202,13 @@
           <span class="slabel">数据文件</span>
           <span class="spath" id="pathText">—</span>
           <button class="btn btn-sm" id="btnCopyPath">复制路径</button>
+        </div>
+        <div class="srow">
+          <span class="slabel">位置</span>
+          <span class="sctl gap">
+            <button class="btn btn-sm" id="btnPickDir">更换位置…</button>
+            <button class="btn btn-sm" id="btnRestoreDir" hidden>恢复默认位置</button>
+          </span>
         </div>
         <div class="srow">
           <span class="slabel">备份</span>

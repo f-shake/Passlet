@@ -1713,3 +1713,388 @@ logic.js 新增/变更的导出（字段级）：
 | 构建 | `cargo build -p passlet` 通过；`node scripts/build-preview.mjs` 产出预览 1406 KB |
 | 实现期决定 | ① `fitPop(pop, bounds)` 多了 bounds 形参（查询页传 `#app`，表单传弹窗）——计划只写“沿用翻转思路”；② 键盘高亮除底色外加左侧竖条（深色主题下底色太弱）；③ 平台候选顺序沿用 `platformList()` 的现有顺序（实测与插入顺序不同），端到端因此按实际顺序算期望值；④ 读音表把 ü 统一写成 v（`女=nv`） |
 | 未覆盖 | 真实输入法组合输入无法自动化：只做了 `isComposing`/`keyCode 229` 的代码守卫，靠审查而非跑通验证；`pinyin-data.js` 在 exe 里的 brotli 体积未单独测量 |
+
+## 追加需求：数据位置可配置（2026-11-13 提出，待确认后实施）
+
+### D0 背景与已知输入
+
+用户原话：“我希望这个能让我放在 OneDrive 等地方，然后这样就可各电脑同步了……我建议是程序里允许修改数据位置。”
+
+已表态、**本次明确不管**的四类风险（留档，不再实现）：
+
+| # | 风险 | 用户态度 | 计划里的处置 |
+|---|---|---|---|
+| 1 | 两台机同时打开 → OneDrive 留冲突副本，另一边的编辑静默消失 | 不考虑，假设不会同时使用 | **不做**外部改动检测，不加锁、不做冲突合并 |
+| 2 | OneDrive 按需下载的占位符读不到 | 没关系 | 报错即止，不做特判、不主动触发下载 |
+| 3 | 同步句柄挡住 rename，偶发写盘失败 | 应该不会 | 沿用现有回滚（失败报错、文件不丢），不加轮询重试 |
+| 4 | 密文上云、版本历史保留旧密文 | 没事 | 不做额外加密层，不改主密码机制 |
+
+当前事实（决定改造点）：
+
+- 路径硬编码：`paths::data_dir()` = `%APPDATA%\Passlet`，`vault.dat` 与 `config.json` 同目录（[paths.rs](../core/src/paths.rs)、[config.rs](../core/src/config.rs)）。
+- GUI 无任何位置设置；CLI 有 `--vault <目录>`（[main.rs](../cli/src/main.rs) `data_dir()`）。
+- 库是**单文件**、整文件读写、写盘走 `tmp → .bak → 正式名` 三步（[storage.rs](../core/src/storage.rs)）。
+- `config.json` 里没有秘密，且记录的是**每台机自己的**偏好（窗口尺寸、主题）。
+
+### D1 功能需求
+
+| # | 需求（每条都可被一条用例验证） |
+|---|---|
+| R1 | 设置页「数据」分组显示当前数据文件的路径（过长时中间省略，完整值在悬停提示与「复制路径」里），并新增按钮「更换位置…」。 |
+| R2 | 点「更换位置…」弹出系统文件夹选择框，初始目录 = 当前库所在目录；取消则一切不变。 |
+| R3 | 选定的目录里**没有** `vault.dat` → 执行**迁移**：把当前库原样搬到该目录，指针改过去；成功后设置页路径立刻更新，当次会话继续可用，不重启。 |
+| R4 | 选定的目录里**有**能解开（主密码一致）的 `vault.dat` → 执行**连接**：切换到那份库，当前库原位不动；条目列表立即变成那份库的内容。 |
+| R5 | 选定的目录里**有** `vault.dat` 但解不开 → 拒绝，指针与两份文件都不动。 |
+| R6 | 当前不是默认位置时，按钮「恢复默认位置」可见；点它 = 把当前库**迁移回** `%APPDATA%\Passlet`（不是"打开默认目录里那份旧东西"）。 |
+| R7 | 迁移完成后，源目录里的 `vault.dat` 改名为 `vault.dat.moved-<时间戳>`（不删），成功提示里给出完整路径；源目录的 `vault.dat.bak` 原地不碰。 |
+| R8 | 配置目录不跟着搬：`config.json` 永远在 `%APPDATA%\Passlet`。同步的只有库文件及其同名派生文件。 |
+| R9 | CLI 不带 `--vault` 时也跟随 GUI 设的位置；带 `--vault` 时以参数为准（临时覆盖，不改配置）。 |
+| R10 | 指针指向的非默认目录里没有 `vault.dat` 时**不当首次运行**：启动报 `vault_missing`，错误页给出出口按钮，绝不静默显示空库。 |
+| R11 | `vault_missing` 的错误页提供「在这里新建空库」：二次确认后用当前主密码在该位置新建 0 条目的库，指针不变。这是唯一允许在“非首次运行”状态下创建库文件的入口。 |
+| R12 | 迁移前**总是**弹一次确认框：显示当前位置、新位置、条目数量、以及“只搬 `vault.dat`、原文件会改名保留”；点「取消」则一切不动。 |
+| R13 | `vault_missing` 的错误页给三个出口：「改回默认位置」「选择数据目录…」「在这里新建空库」；无会话时前两个仍可用。 |
+
+### D2 技术方案（选型 + 否决理由）
+
+选定：
+
+1. **只让「库文件目录」可配，配置目录固定**。`config.json` 留在 `%APPDATA%\Passlet`，`vault.dat` 及 `.bak` / `.moved-*` 跟着设置走。
+   理由：配置里的主题与窗口尺寸是**每台机自己的**，跟着 OneDrive 走会让两台机的窗口尺寸互相打架；而且指针存在 `config.json` 里不会出现“指针在哪”的鸡生蛋问题。
+2. **指针写在 `config.json` 的 `vaultDir` 字段**（绝对路径字符串，`None` = 默认目录）。
+   理由：已有config 的读写、净化、迁移路径齐全，加一个字段即可；不引入第二个配置文件。
+3. **迁移 = 字节复制 + 能解密校验 + 写指针 + 源文件改名**，不重新加密。
+   理由：`vault.dat` 自带盐，字节复制后盐与密钥不变，新位置读出来与原文件**逐字节相同**，可以拿内容比对当校验；重加密会换盐，出错时无法比对。
+4. **判定迁移还是连接，由目标目录有没有库自动决定**，不弹模式选择。
+   理由：用户只需表达“我要用这个目录”，模式是实现细节；多一个选择就多一次点错的机会。
+5. **新模块 `core/src/location.rs`** 承担“库目录怎么定”的唯一真相，`commands` / `cli` 都向它要路径。
+   理由：今天 `paths` / `storage` / `commands` 三处各自拼路径，再加一个配置来源必然分叉。
+
+否决的备选：
+
+| 备选 | 为什么否决 |
+|---|---|
+| 用 NTFS junction 把 `%APPDATA%\Passlet` 链到 OneDrive | 隐式、程序里看不见、换机不可复制；备份/清理工具会绕开；出问题难排查 |
+| 整个数据目录（含 `config.json`）搬走 | 指针存在被搬走的文件里，鸡生蛋；且窗口尺寸等会跨机同步 |
+| 用环境变量 `PASSLET_VAULT_DIR` 指定 | 多一个“设置里改了为什么不生效”的坑；CLI 已有 `--vault`，排障够用 |
+| 让用户手改 `config.json` | 无校验、写错就是空库或打不开；且指向不存在目录时无法给出可操作的提示 |
+| 把库放在 exe 同目录 | 装进 `Program Files` 后不可写（这也是当初选 `%APPDATA%` 的原因） |
+| 迁移时重新加密（新盐） | 失败后无法用“内容一致”判断迁移是否完整；盐无必要地变动 |
+
+明确不做（与 D0 一致）：冲突检测、多机合并、占位符特判、外部改动提示、写盘重试。
+
+### D3 系统结构
+
+```
+frontend/index.html   设置页「数据」行两个按钮 + 错误页一个按钮
+      │
+frontend/app.js       openDirPicker() / applyDirSwitch() / renderDataLocation()
+      │
+frontend/api.js       vaultLocation() / pickVaultDir() / switchVaultDir()
+      │  （Tauri invoke）
+src-tauri/commands.rs vault_location / pick_vault_dir / switch_vault_dir
+      │                        └─ 对话框（tauri-plugin-dialog，已有依赖）
+      │
+core/location.rs      config_home() … default_vault_dir() … vault_dir() … ensure_vault_dir() … set_vault_dir()
+      │                        │
+core/config.rs        Config.vault_dir ──┘
+      │
+core/store.rs / storage.rs / crypto.rs   （不变：仍只认一个目录参数）
+```
+
+调用关系要点：`location` 依赖 `config` 与 `paths`；`config` 只依赖 `paths`；`commands` 与 `cli` 只依赖 `location`，不再直接拼 `%APPDATA%`。
+
+### D4 数据结构
+
+```rust
+// core/src/config.rs —— 新增字段，老配置缺它时为 None
+pub struct Config {
+    // …原有字段不变…
+    /// 数据文件所在目录（绝对路径）。None = 默认目录 %APPDATA%\Passlet。
+    #[serde(default)]
+    pub vault_dir: Option<String>,
+}
+```
+
+净化规则（`Config::sanitized`）：`Some(s)` 若 `s.trim().is_empty()` 或不是绝对路径 → `None`；`Some(默认目录本身)` → 也归为 `None`（避免“配置写着默认目录”与“没配”两种表示）。
+
+```rust
+// 返回给前端
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultLocation {
+    pub dir: String,          // 当前库目录
+    pub file: String,         // 当前库文件完整路径（设置页显示这一行）
+    pub is_default: bool,     // 决定「恢复默认位置」是否出现
+    pub default_dir: String,  // 默认目录，用于提示文案
+    pub exists: bool,         // dir 里 vault.dat 是否存在
+}
+
+// switch_vault_dir 的回执
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultSwitchReport {
+    pub kind: String,         // "moved" | "connected" | "unchanged"
+    pub dir: String,
+    pub file: String,
+    pub entries: usize,       // 切换后库里条目数（前端据此决定是否刷新列表）
+    pub retired: Option<String>, // 被改名的源文件完整路径（仅 moved）
+}
+```
+
+新增错误码（沿用现有 `AppError.code` 约定）：`vault_missing`、`not_writable`、`wrong_master`（复用）、`corrupt`（复用）、`invalid`（复用）。
+
+### D5 模块划分（职责 / 不负责什么）
+
+| 模块 | 负责 | **不负责** |
+|---|---|---|
+| `core/location.rs`（新） | 解析库目录优先级（config → 默认）、确保目录存在、读写指针、给出默认目录 | 不打开库、不搬运文件、不弹对话框、不做迁移决策 |
+| `core/storage.rs` | 字节读写与原子写、`retire_in`（把某文件改名成 `.moved-<tag>`） | 不知道配置、不知道“迁移/连接” |
+| `core/config.rs` | `Config` 字段定义、净化、读写 | 不判断库在哪，不碰 `vault.dat` |
+| `src-tauri/commands.rs` | 三个命令、目录选择对话框、迁移/连接的编排与回滚、错误码 | 不直接拼路径、不做 UI 文案排版 |
+| `frontend/app.js` | 按钮显隐、提示文案、切换后刷新路径与列表 | 不判断“该迁移还是该连接”（后端判定） |
+| `cli/main.rs` | 解析 `--vault`，否则向 `location` 要目录 | 不改配置、不做迁移 |
+
+### D6 交互逻辑
+
+设置页「数据」分组（沿用现有 3 列布局）：
+
+```
+数据文件   C:\Users\autod\OneDrive\Passlet\vault.dat        [复制路径]
+                                    [更换位置…]  [恢复默认位置]
+```
+
+| 步骤 | 发生什么 |
+|---|---|
+| 点「更换位置…」 | 按钮置灰 → 系统文件夹框（初始 = 当前目录） |
+| 用户取消 | 按钮恢复，无任何变化 |
+| 选中目录 == 当前目录 | toast「已经在这个位置」 |
+| 选中目录无 `vault.dat` | **先弹确认框**（见下）→ 点「继续」才迁移：复制 → 校验 → 写指针 → 源文件改名 → 提示框告知新路径与旧文件的改名位置 → 设置页路径更新、「恢复默认位置」变为可见 |
+| 选中目录有可解库 | 连接：写指针 → 换 session → toast「已切换到该位置的密码库（N 条）」→ 刷新列表与路径 |
+| 选中目录有不可解库 | 报错提示（见 D7），指针不变，源文件不动 |
+| 点「恢复默认位置」 | 同「更换位置…」但目标是默认目录，且**强制迁移**（不因默认目录里有旧库而走连接） |
+| 启动时指针目录缺库 | 错误页：标题「找不到密码库」，正文给出该路径与两种出路，按钮「选择数据目录…」 |
+
+错误页新增三个按钮，**只在 `reason === "vault_missing"` 时显示**：
+
+| 按钮 | 动作 |
+|---|---|
+| `#errResetDir`「改回默认位置」 | 走同一条换位置流程（目标 = 默认目录）。这个状态下列表里没有库可搬，所以实际动作是“把指针指回默认目录”：默认目录里有库就直接打开它；没有库则清掉指针后按**首次运行**处理（进入空库查询页，界面上会明说“会以空库开始”）——那种情况要真正造一个库文件，仍要在错误页点「在这里新建空库」 |
+| `#errPickDir`「选择数据目录…」 | 同设置页「更换位置…」：目标有库则连接，目标无库则迁移 |
+| `#errNewVault`「在这里新建空库」 | 二次确认「将在 `<路径>` 用当前主密码新建一个空的密码库，继续？」→ 写入 0 条目的库 → 重载 |
+
+无会话（主密码读不到）时：三个按钮里只有「在这里新建空库」不可用（它也要主密码），另两个可用——迁移与连接都不需要先有会话，“连接”会顺带把会话建起来（密码能读到就用 `master::read`，读不到就提示「先把主密码设好」）。
+
+迁移前的确认框（Q6 决议：**总是确认**）：
+
+```
+把密码库换个位置？
+
+当前位置  C:\Users\autod\AppData\Roaming\Passlet\vault.dat
+新位置    C:\Users\autod\OneDrive\Passlet\vault.dat
+条目数量  42 条
+
+只搬 vault.dat 这一个文件；原位置的文件会改名为 vault.dat.moved-<时间戳> 留着。
+
+                                      [取消]  [继续]
+```
+
+条目数量那行照实显示（0 条时就是「0 条」），**不因空库另做提示或分支**（Q7 决议：迁移只看两个位置里有没有库文件，与条目数无关）。
+
+### D7 异常情况（表现与提示文案）
+
+| 场景 | 判定 | 用户看到 |
+|---|---|---|
+| 目标目录不可写 | 试写 `.passlet-write-test` 失败 | 「这个位置不可写，换一个目录试试。」（若在 OneDrive 里：等同步完成后重试） |
+| 目标位置里的 `vault.dat` 解不开（主密码不一致） | `store::open_in` 返回 `decrypt_failed` | 「这个位置里的密码库打不开：它的主密码和当前的不一致。先在那边导出备份、再导入这边，或者把主密码换成它那个。」 |
+| 目标位置里的 `vault.dat` 不是 Passlet 文件 | 返回 `corrupt` | 「这个位置里的 vault.dat 不是 Passlet 的密码库文件，换一个位置。」 |
+| 复制后校验不一致 | 读回字节与原文件不同 | 「写入这个位置后校验没通过，已撤销，数据仍在原位置。」 |
+| 复制失败（磁盘满、权限） | io 错误 | 「复制到 <目录> 失败：<原因>。数据仍在原位置。」 |
+| 源文件改名失败（同步句柄占用） | rename 报错 | 迁移仍算成功（新位置已可用），提示里追加一句「原位置的 vault.dat 没能改名，你可以手动删除」 |
+| 指针写盘失败 | config::save 报错 | 删掉刚复制过去的文件，回滚，「保存设置失败：<原因>，数据仍在原位置。」 |
+| 启动时指针目录不存在 / 无库 | `vault_missing` | 错误页：「找不到密码库：<路径>。这个位置可能还没同步下来，或者目录被改名了。可以点下面的按钮选一个目录，或把库放回原处后点『重新读取』。」 |
+| 目标路径过长 / 含非法字符 | 目录框本身会挡掉大部分；其余走 io 错误 | 「这个路径用不了：<原因>。」 |
+
+### D8 边界条件
+
+| 情况 | 行为 |
+|---|---|
+| `config.json` 里没有 `vaultDir` | 默认目录，行为与今天完全相同（老用户零感知） |
+| `vaultDir` 是相对路径 / 空串 | 净化成 `None`（默认目录），不报错 |
+| `vaultDir` 指向默认目录本身 | 净化成 `None` |
+| 默认目录里没有 `vault.dat` | 首次运行：空库，第一次保存时创建（与今天一致） |
+| **非默认**目录里没有 `vault.dat` | `vault_missing` 报错，绝不建空库（见 R10） |
+| 条目数为 0 的库 | 可以连接，连接后显示空列表 |
+| 目标目录里还有旧 `.bak` / 带时间戳的备份 | 不读、不删、不搬；只操作 `vault.dat`（强制迁移时把它改名成 `.moved-<时间戳>`，不动 `.bak`） |
+| 迁移时源目录只剩 `.bak` | 不搬 `.bak`；新位置第一次写盘会自然生成新 `.bak` |
+| `config.json` 被删 / 被还原 | 指针丢 → 回到默认目录；此时可能看到“空库”。README 的排障段落写明：去 OneDrive 目录把 `vault.dat` 拷回来 |
+| 目标目录是 OneDrive 且文件为占位符 | 读取时由系统触发下载；下载失败按 io 报错，不做特判 |
+| 同一次运行里连续切换两次 | 第二次照常执行（每次都以当前目录为源） |
+
+### D9 修改范围（文件清单 · 基线）
+
+新增（进 git）：
+
+| 文件 | 内容 |
+|---|---|
+| `core/src/location.rs` | 目录解析 + 指针读写 + 内联单测 |
+| `tests/dir-location.test.js` | 设置页显隐与提示文案的纯函数测试 |
+
+修改：
+
+| 文件 | 改动 |
+|---|---|
+| `core/src/lib.rs` | `pub mod location;` |
+| `core/src/paths.rs` | 注释更新为“配置目录”；保留 `data_dir()` 语义（= 配置目录）以免牵动 `config.rs` |
+| `core/src/config.rs` | `vault_dir` 字段 + 净化 + 用例 |
+| `core/src/storage.rs` | 新增 `retire_in`；删掉 `data_dir()` / `vault_path()` 两个“面向真实目录”的薄包装（避免第二处拼路径的真相） |
+| `src-tauri/src/commands.rs` | 四个新命令（`vault_location` / `pick_vault_dir` / `switch_vault_dir` / `create_vault_here`）；`unlock()` / `persist()` / `master_info()` / `set_master_env()` / `import_from()` 备份目录 / `change_master()` 等所有 `paths::data_dir()`、`storage::data_dir()`、`storage::vault_path()` 调用点改为 `location::*`；用例 |
+| `src-tauri/src/lib.rs` | 注册四个命令 |
+| `cli/src/main.rs` | 无 `--vault` 时向 `location::ensure_vault_dir()` 要目录 |
+| `frontend/index.html` | 设置页「数据」行加两个按钮；错误页加 `#errResetDir` / `#errPickDir` / `#errNewVault` 三个按钮 |
+| `frontend/api.js` | 四个函数 |
+| `frontend/app.js` | 按钮显隐与交互、切换后刷新、错误页 `vault_missing` 分支 |
+| `frontend/logic.js` | `dirLabel()`（路径中间省略的显示策略）与纯判定函数，供单测 |
+| `frontend/styles.css` | 仅在按钮挤不下时补样式（预期 0~5 行） |
+| `README.md` | 「数据位置」一节：怎么放到 OneDrive、迁移做什么、指针丢了怎么办 |
+| `docs/PLAN.md` | 本节 + 实施记录 |
+
+不改：`crypto.rs`、`vault.rs`、`store.rs`、`generators.rs`、`master.rs`、`tauri.conf.json`、`capabilities/default.json`（对话框权限已在 Rust 侧调用，无需新增）、pinyin 相关、`vault.dat` 格式。
+
+### D10 实现步骤
+
+| # | 步骤 | 独立验证方式 |
+|---|---|---|
+| 1 | `Config.vault_dir` + 净化 + 用例 | `cargo test -p passlet-core config` |
+| 2 | `location.rs`：`config_home` / `default_vault_dir` / `vault_dir` / `ensure_vault_dir` / `set_vault_dir` + 用例（用临时 `APPDATA`） | 同上，`location` 模块 |
+| 3 | `storage::retire_in` + 用例 | 同上 |
+| 4 | `commands`：`vault_location` / `pick_vault_dir` / `switch_vault_dir`（迁移、连接、拒绝三分支 + 回滚）/ `create_vault_here` | `cargo test -p passlet` 的 commands 用例 |
+| 5 | 把 `commands` 里所有旧路径调用点换成 `location::*` | 全量 cargo test + 手工启动 |
+| 6 | `cli` 跟随配置；`--vault` 仍可覆盖 | `passlet-cli doctor`、`passlet-cli --vault <临时目录> doctor` |
+| 7 | 前端：`api.js` 三函数 + `index.html` 两个按钮 + 错误页按钮 | 预览页无后端时按钮走 `no_host` 提示，不崩 |
+| 8 | 前端交互：选择框 → switch → 刷新路径/列表/按钮显隐 + 提示文案 | 手工点一遍三类结果 |
+| 9 | `logic.js` 纯函数 + `tests/dir-location.test.js` | `npx vitest run tests/dir-location.test.js` |
+| 10 | 文档（README / PLAN 实施记录）+ 预览构建 | `node scripts/build-preview.mjs` |
+
+### D11 测试方案
+
+Rust 单测（内联）：
+
+- `config`：缺字段 → `None`；相对路径 / 空串 → `None`；默认目录绝对路径 → `None`；自定义绝对路径 → 原样；`save` 后 `load` 能读回。
+- `location`：无配置 → 默认目录；有配置 → 配置目录；`ensure_vault_dir` 会创建；`set_vault_dir(None)` 清掉；`set_vault_dir` 不动其它配置项（主题、窗口尺寸）。
+- `storage::retire_in`：改名成功并返回新路径；目标已存在时用新时间戳；源不存在时返回 `None`。
+- `commands`：临时目录 A 建库（2 条）→ 切到空目录 B → B 里有 `vault.dat`、内容与 A 逐字节相同、A 里 `vault.dat` 消失而 `vault.dat.moved-*` 存在、session 仍可读 2 条；目标 C 里放一份同密码库（1 条）→ 切过去 → 条目变 1 条且 `kind == "connected"`；目标 D 里放异密码库 → `wrong_master` 且指针不变；目标 E 里放垃圾文件 → `corrupt`；非默认目录无库 → `vault_missing`；切到当前目录 → `unchanged`；`create_vault_here` 在空目录里建出 0 条目的库且能用主密码重新打开、在已有库的目录里拒绝执行。
+
+前端单测（vitest，新文件 `tests/dir-location.test.js`）：
+
+- `dirLabel(path, maxChars)`：长路径中间省略且首尾保留；短路径原样；刚好等长边界。
+- `showRestoreDefault(isDefault)`：默认时不显示、非默认时显示。
+- `switchToast(report)`：`moved` / `connected` / `unchanged` 三种回执给出不同文案（含条目数）。
+
+端到端（阶段四）：
+
+- 写一份 `config.json` 指向临时目录 + 把库拷过去 → 启动 → 设置页路径显示正确、能进清单、条目数与库一致 → 关闭。
+- 把指针改回默认目录且那里没有库 → 启动应出现「找不到密码库」错误页，且**不显示空库**。
+- CLI：`passlet-cli doctor` 报告的目录与 GUI 一致；`--vault` 覆盖生效。
+- 原生文件夹对话框的点击交互无法稳定自动化，由我在阶段四手工点一次并留截图说明；脚本覆盖“指针 → 启动 → 显示”这一半。
+
+### 附：已定决策（D12，2026-11-13 第一轮追问已确认）
+
+| # | 问题 | 决定 |
+|---|---|---|
+| Q1 | 迁移后源目录的 `vault.dat` 怎么处理 | **B**：改名为 `vault.dat.moved-<时间戳>` 保留，不删除 |
+| Q2 | 「恢复默认位置」的语义 | **A**：把当前库搬回默认目录——**数据总是跟着指针走**，不存在“打开默认位置里那份旧东西” |
+| Q3 | CLI 不带 `--vault` 时是否跟随 GUI 位置 | **A**：跟随同一份 `config.json`；`--vault` 仍是临时覆盖 |
+| Q4 | 非默认目录里没有 `vault.dat` | **A**：报 `vault_missing`，不建空库；**另给按钮允许用户显式建空库**（已落成 R11） |
+| Q5 | 目标位置里的 `vault.dat` 解不开 | **A**：拒绝切换并说明出路（判定对象是**文件**，不是目录，文案已按此修正） |
+
+### 附：已定决策（第二轮，2026-11-13 已确认）
+
+| # | 问题 | 决定 |
+|---|---|---|
+| Q6 | 迁移前是否确认 | **A**：总是确认，框内显示当前位置、新位置、条目数量与“只搬 `vault.dat`、原文件改名保留”（已落成 R12） |
+| Q7 | 空库（0 条）迁移到空目录 | **不成立，取消**。用户反问“这有啥关系”，确认了迁移只看两个位置里有没有库文件，与条目数无关；`0 条` 只是确认框里的一个显示值，不另做提示或分支 |
+| Q8 | `vault_missing` 错误页出口 | **A**：三个——改回默认位置 / 选择数据目录… / 在这里新建空库（已落成 R13） |
+
+### 附：计划自查（对照阶段一六问）
+
+| 审查点 | 结论 |
+|---|---|
+| 需求理解正确 | 用户要的是“程序里能改数据位置”，不是“自动同步”；D1 的 R1–R13 全部落在设置页、错误页与三处路径解析上 |
+| 技术方案合理 | 单字段 + 一个 core 模块 + 三个命令；否决了 junction、整目录搬迁、环境变量三条路 |
+| 修改范围准确 | 新增 2 个文件、改 14 个（含本节文档）；Rust 会话层/加密层/库格式零改动 |
+| 关键场景无遗漏 | 首次运行、指针失效、目标已有库、密码不一致、不可写、路径过长、连续切换两次、空库迁移、空目录新建、无会话时点按钮 |
+| 潜在风险 | ① 指针失效时用户以为“库没了”（用错误页 + README 兜）② 迁移中改名失败留下两份（提示里说明）③ 原生对话框不可自动化（阶段四手工一次） |
+| 路径符合预期 | 10 步，每步可单测或可手工验证；先 core 再命令层最后前端 |
+
+### D13 实施记录（2026-11-13，阶段二）
+
+| 项 | 结果 |
+|---|---|
+| 目录解析 | 新增 `core/src/location.rs`：`vault_dir_in(&Config)` 是唯一真相；`set_vault_dir_in(config_home, dir)` 让测试不碰真实配置；`paths::same_dir` 只做字符串归一（大小写、分隔符、末尾斜杠） |
+| 指针 | `Config.vault_dir: Option<String>`；`sanitized()` 把空串/相对路径/等于默认目录的值都归成 `None`，于是“去默认目录”只有一种表示 |
+| 迁移 | 复制磁盘字节（不是重新加密，因此两边逐字节相同）→ 读回逐字节校验 → 写指针 → 源文件改名 `vault.dat.moved-<时间戳>`（同秒重复时加 `-2`、`-3`，绝不覆盖已留档的）；任一步失败都停在前一步，原库不动 |
+| 连接 | `store::open_in` 解目标库；`decrypt_failed` 转成 `wrong_master`（带“怎么搬过去”的说明），`corrupt` 单独报；先写指针再换 session，写盘失败时会话仍指旧库 |
+| 两个阶段 | `switch_vault_dir` 在没拿 `confirm` 时只回执 `needs_confirm`（带条目数），界面确认后再发一次才动文件；`mode="move"` 给「恢复默认位置」用，即使目标有库也强制迁 |
+| 建空库 | `create_vault_here` 只在 `vault_missing` 时可达，用当前主密码建 0 条目的库；已有库时拒绝 |
+| 安全网 | `unlock_at` 在**非默认**目录缺 `vault.dat` 时报 `vault_missing`，绝不退化成空库；默认目录缺库仍是首次运行 |
+| 命令替换 | `vault_path_display` 删掉，换成 `vault_location`；`unlock` / `persist` / `master_info` / `set_master_env` / `import_from` / `change_master` 全部改走 `location::*`；`storage` 里的 `data_dir()` / `vault_path()` / `write_vault()` 三个薄包装一并删除（避免第二处拼路径的真相） |
+| 命令行 | 不带 `--vault` 时用 `location::ensure_vault_dir()`，与界面同库；`--vault` 仍是临时覆盖 |
+| 前端 | 设置页新增「位置」行（更换位置… / 恢复默认位置）；错误页新增三个出口按钮，`.err-actions` 加 `flex-wrap` 否则 462px 放不下；`logic.js` 新增 `dirLabel` / `showRestoreDefault` / `switchToast` |
+| 单测 | Rust +27：core 91（+19：config 5、location 9、paths 2、storage 3）、tauri 20（+8）；前端 +21：`dir-location.test.js` 17、`api-contract.test.js` 4 条新命令契约 |
+| 端到端 | `temp/e2e-datadir.ps1` 26 项全过（隔离 APPDATA）：指针指向别处 → 设置页显示该位置 → 恢复默认位置 → 确认框 → 库搬回、云端留档、配置清空 → 命令行看到 2 条；指针指向空目录 → 错误页（不是空库）→ 三个出口 → 新建空库 → 回查询页 |
+| 与计划的差异 | ① 命令数从 3 变 4（多了 `create_vault_here`，来自 Q4 的追问结论）；② `VaultSwitchReport` 多了 `warning` 字段（D7 要求“源文件改名失败时提示里追加一句”，没有这个字段就传不回去）；③ 迁移取字节时**优先读磁盘**而不是重新封包 session（计划只写“字节复制”，这里明确了取哪一份，并且让“逐字节相同”可断言）；④ 计划里“迁移前弹确认框”没有专门命令，改成 `confirm` 参数复用同一个命令 |
+| 未覆盖 | 原生文件夹选择框的点击没有自动化（`pick_vault_dir` 只做了契约测试）；真实 OneDrive 目录未实测（用本地临时目录代替，两者在文件系统层面无差别）；发布版 exe 的打包未重做（`bundle.resources` 依赖 `target/release/passlet-cli.exe`，已重新构建） |
+
+### D13 复核记录（2026-11-14，阶段三）
+
+独立子代理第 1 轮（全范围）报 10 条 + 3 条待裁决。逐条判断：**10 条全部属实**，全部修复并补了用例。
+
+| # | 问题 | 修法 |
+|---|---|---|
+| 1 | 错误页「改回默认位置」必然失败（缺库状态下没有可搬的库，`migrate_to` 直接报 invalid），且 confirm 被前端硬编码 | `switch_inner` 新增“没有库可搬”分支：目标有库就直接连接，没有就只改指针并回执 `cleared`；前端改走同一条 `applyDirSwitch` 流程，要不要确认交给后端判定 |
+| 2 | 换完位置不刷新 `S.config`，之后改任何设置都会把旧 `vaultDir` 写回去 | `afterDirSwitch` 重新 `getConfig()` |
+| 3 | R7 要求迁移成功给出完整路径，实际只有一行 toast，`retired` 没人消费 | 新增回执弹窗：新位置、条目数、`vault.dat.moved-*` 的完整路径 |
+| 4 | 强制迁移会把目标原有库顶成 `.bak`（顺带删掉目标原有的 `.bak`），回滚不还原 | 迁移前先把目标那份改名成 `.moved-<时间戳>`；回滚时删新文件并把留档改回原名 |
+| 5 | D7 的写前预检与 `not_writable` 没实现；`absolute_dir` 把路径放进了“原因”位 | 新增 `ensure_writable`（探针文件 `.passlet-write-test`）；`invalid` 文案改成“不是绝对路径 / 不是一个目录” |
+| 6 | CLI 跟随配置却没有 `vault_missing` 保护，会在缺库的位置写出空库 | 新增 `guard_location`（只在跟随配置时拦，`--vault` 仍按首次运行）；退出码加 6，README 同步 |
+| 7 | `same_dir` 只比字符串，junction / `subst` / UNC 别名会被当成新位置，库会被改名到目录里一份都不剩 | 新增 `same_physical`：字符串相同或 `canonicalize` 之后相同即视为同一位置 |
+| 8 | README 两处与实现相反（写了不存在的 `import-backup-*`；指针丢了却说会报错） | 两段按实现重写；PLAN 的 D8 命名同步 |
+| 9 | `api.js` 注释写着 `needsConfirm`（实际 `needs_confirm`），`reason` 枚举缺 `vault_missing` | 注释改正 |
+| 10 | `VaultLocation.exists` 无人消费；缺库文案在 Rust 与 JS 各存一份 | 删掉该字段；`AppStatus.message` 带出后端原文，前端只补后半句 |
+
+待裁决三条的处理：
+
+1. **目标已有库时覆盖还是打开**：两处状态不同，不改实现——设置页「恢复默认位置」是“有库要搬”，强制迁移并把目标那份留档；错误页「改回默认位置」是“没有库可搬”，直接连接默认目录那份。D6 的措辞已按此改写。
+2. **R1 的“完整路径”与 `dirLabel` 省略**：改需求措辞，不改代码——R1 改为“路径（过长时中间省略，完整值在悬停提示与『复制路径』里）”。
+3. **R10 是否约束 CLI**：约束。已按第 6 条修复，`--vault` 例外，退出码 6。
+
+修复后自测：core 91、tauri 24（+4）、cli e2e 8、前端 196（dir-location 18，+1）、端到端 `temp/e2e-datadir.ps1` 32 项全过（新增 C 组：缺库状态下点「改回默认位置」能把人救回来）。
+**第 2 轮回执（2026-11-14）**：10 条全部回「已修复」，三条待裁决全部「接受」；同时报出 5 条本轮修复带出来的遗留，全部属实、一并修掉：
+
+| # | 遗留 | 修法 |
+|---|---|---|
+| 11 | `cleared` 之后会以首次运行的空库进入查询页，D6 却写成“停在错误页等你点新建空库” | 文档按实际行为改写；前端对 `cleared` 补一句 toast：“已改回默认位置；那里还没有密码库，会以空库开始。” |
+| 12 | 迁移回执里“原位置的那份已改名保留”是无条件渲染的，`retired` 为 null 时自相矛盾 | 这句跟着 `retired` 一起条件渲染 |
+| 13 | `write_atomic_in` 失败时会把**目录里原有的** `.bak` 认领成自己的轮换产物、改名成 `vault.dat`，随后被迁移回滚删掉 | 只有本次调用自己轮换出来的 `.bak` 才允许搬回；新增用例“目录里原有的 bak 不会被写盘当成自己的轮换产物” |
+| 14 | `location_info` 判 `is_default` 只比字符串，指针是默认目录的 alias 时会显示一个点了只回 `unchanged` 的按钮 | 改用 `same_physical` |
+| 15 | `frontend/api.js` 行尾多了一个 `;;` | 删掉 |
+
+修复后自测：core 92（+1）、tauri 24、cli e2e 8、前端 196、端到端 `temp/e2e-datadir.ps1` 32 项全过。
+**第 2 轮附带遗留（5 条，已修复）**
+
+| # | 问题 | 修法 |
+|---|---|---|
+| 11 | `cleared` 之后实际按首次运行进了空库，PLAN 却写“停在错误页” | PLAN:1881 改写；`afterDirSwitch` 新增 `cleared` 分支，按“是不是默认目录”给两种提示（默认目录那句明说“会以空库开始”） |
+| 12 | 迁移回执里“原位置的那份已改名保留”无条件渲染 | 整句放进 `report.retired ? ... : ""`，只有真的有留档时才说 |
+| 13 | `write_atomic_in` 失败路径会把目录里**别人的** `.bak` 认领成自己的轮换产物 | 新增 `rotated` 标记，只有本次调用确实轮换过才允许搬回；判定收进 `restore_from_bak` |
+| 14 | `location_info` 判 `is_default` 只比字符串 | 改用 `same_physical` |
+| 15 | `api.js` 多一个 `;;` | 删掉 |
+
+**第 3 轮（2 条清理项，已修复）**
+
+| # | 问题 | 修法 |
+|---|---|---|
+| 16 | `switchToast` 里的 `cleared` 文案永远看不到（`afterDirSwitch` 紧接着又发第二条 toast，覆盖前一条） | 删掉 `switchToast` 的 `cleared` 分支，文案只留在 app.js 那处；用例改为断言它返回空串 |
+| 17 | 第 13 条那条新用例对**旧实现同样通过**，抓不到它声称的 bug（旧代码在目标不存在时也不会碰 `.bak`） | 把“要不要认领 `.bak`”抽成 `restore_from_bak(target, bak, rotated)` 并直接测这个判定；旧的“无条件搬回”会让它红 |
+
+第 3 轮之后自测：core 92、tauri 24、cli e2e 8、前端 196、端到端 32 项全过。

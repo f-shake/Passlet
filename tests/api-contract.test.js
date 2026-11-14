@@ -111,10 +111,38 @@ describe("配置与备份命令", () => {
     expect(lastCall()).toEqual({ command: "save_config", args: { config: payload } });
   });
 
-  it("vaultPath 对应 vault_path_display", async () => {
-    nextResult = "C:\\vault.dat";
-    await api.vaultPath();
-    expect(lastCall()).toEqual({ command: "vault_path_display", args: {} });
+  it("vaultLocation 不带参数，返回里带文件完整路径", async () => {
+    nextResult = {
+      dir: "C:\\Users\\autod\\OneDrive\\Passlet",
+      file: "C:\\Users\\autod\\OneDrive\\Passlet\\vault.dat",
+      isDefault: false,
+      defaultDir: "C:\\Users\\autod\\AppData\\Roaming\\Passlet"
+    };
+    await expect(api.vaultLocation()).resolves.toMatchObject({
+      file: "C:\\Users\\autod\\OneDrive\\Passlet\\vault.dat"
+    });
+    expect(lastCall()).toEqual({ command: "vault_location", args: {} });
+  });
+
+  it("pickVaultDir 对应 pick_vault_dir，不带参数", async () => {
+    nextResult = "C:\\Users\\autod\\OneDrive\\Passlet";
+    await api.pickVaultDir();
+    expect(lastCall()).toEqual({ command: "pick_vault_dir", args: {} });
+  });
+
+  it("switchVaultDir 传 dir / mode / confirm", async () => {
+    nextResult = { kind: "needs_confirm", entries: 2 };
+    await api.switchVaultDir("C:\\Users\\autod\\OneDrive\\Passlet", "auto", true);
+    expect(lastCall()).toEqual({
+      command: "switch_vault_dir",
+      args: { dir: "C:\\Users\\autod\\OneDrive\\Passlet", mode: "auto", confirm: true }
+    });
+  });
+
+  it("createVaultHere 对应 create_vault_here，不带参数", async () => {
+    nextResult = { kind: "created", entries: 0 };
+    await api.createVaultHere();
+    expect(lastCall()).toEqual({ command: "create_vault_here", args: {} });
   });
 
   it("pickImportFile 对应 pick_import_file", async () => {

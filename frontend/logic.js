@@ -487,7 +487,53 @@
     return key === "ArrowDown" ? "next" : "prev";
   }
 
+  /**
+   * 路径的显示形态：太长就从中间省略，保住盘符与最后几级目录。
+   *
+   * 设置页那一列只有几十个字符宽，而人真正要看的是尾部（`…\OneDrive\Passlet\vault.dat`）：
+   * 从尾部截断会把这个信息切掉，所以是中间省略而不是尾省略。
+   */
+  function dirLabel(path, maxChars) {
+    const text = String(path == null ? "" : path);
+    const limit = Number(maxChars) > 0 ? Math.floor(Number(maxChars)) : 0;
+    if (!limit || text.length <= limit) return text;
+    // 太窄就连省略号都放不下，只剩尾巴还有意义
+    if (limit <= 6) return text.slice(-limit);
+    const keep = limit - 3; // 省略号占三个字符
+    const head = text.slice(0, 3); // 盘符加分隔符，够认出在哪块盘
+    const tailRaw = text.slice(-(keep - head.length));
+    // 尾巴尽量从分隔符开始，免得出现“...OneDriv\Passlet”这种半个词
+    const cut = tailRaw.indexOf("\\");
+    const tail = cut > 0 && cut < 8 ? tailRaw.slice(cut) : tailRaw;
+    return `${head}...${tail}`;
+  }
+
+  /** 「恢复默认位置」只在库不在默认目录时才有意义。 */
+  function showRestoreDefault(isDefault) {
+    return !isDefault;
+  }
+
+  /**
+   * 换位置的几种回执转成一句人话；未知回执返回空串（调用方据此不弹提示）。
+   * `cleared` 不在这里：它要说的话取决于“是不是改回默认目录”，由 app.js 补。
+   */
+  function switchToast(report) {
+    const data = report || {};
+    const entries = Number(data.entries) || 0;
+    if (data.kind === "moved") {
+      const base = `密码库已搬到这里，共 ${entries} 条记录。`;
+      return data.warning ? `${base}${data.warning}` : base;
+    }
+    if (data.kind === "connected") return `已切换到该位置的密码库，共 ${entries} 条记录。`;
+    if (data.kind === "created") return "已在这个位置新建空的密码库。";
+    if (data.kind === "unchanged") return "已经在这个位置。";
+    return "";
+  }
+
   root.PassletLogic = {
+    dirLabel,
+    showRestoreDefault,
+    switchToast,
     normalizeKey,
     matchScore,
     filterOptions,
